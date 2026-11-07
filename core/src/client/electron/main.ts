@@ -1,6 +1,7 @@
 import {
   app,
   BrowserWindow,
+  desktopCapturer,
   globalShortcut,
   ipcMain,
   Menu,
@@ -240,7 +241,23 @@ function togglePanelWindow(): boolean {
   }
 }
 
+async function captureScreenBase64(): Promise<string | undefined> {
+  try {
+    const sources = await desktopCapturer.getSources({
+      types: ["screen"],
+      thumbnailSize: { width: 1280, height: 720 },
+    });
+    if (sources.length > 0 && !sources[0].thumbnail.isEmpty()) {
+      return sources[0].thumbnail.toPNG().toString("base64");
+    }
+  } catch {
+    // Ignore if screen capture permission is not granted
+  }
+  return undefined;
+}
+
 async function triggerManualDiagnosis(hintLevel = "hint"): Promise<void> {
+  const screenshot = await captureScreenBase64();
   showPanelWindow();
 
   // Log hotkey event in Core Server
@@ -265,6 +282,7 @@ async function triggerManualDiagnosis(hintLevel = "hint"): Promise<void> {
       body: JSON.stringify({
         triggerType: "hotkey",
         hintLevel,
+        screenshot,
         fusionReasons: ["Manual 'I'm stuck' hotkey (Ctrl+Shift+K)"],
       }),
     });

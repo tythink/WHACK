@@ -207,6 +207,8 @@ export function createCoreServer(capacity = 100) {
             typeof body.lastKnownGoodDiff === "string"
               ? body.lastKnownGoodDiff
               : undefined,
+          screenshot:
+            typeof body.screenshot === "string" ? body.screenshot : undefined,
           screenshotPath:
             typeof body.screenshotPath === "string"
               ? body.screenshotPath

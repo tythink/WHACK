@@ -27,6 +27,7 @@ export async function runDiagnosis(
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           hintLevel: req.hintLevel,
+          screenshot: req.screenshot,
           attemptLog: req.attemptLog ?? req.recentEvents,
           editorState: req.editorState ?? req.latestEditor,
           terminalState: req.terminalState ?? req.latestTerminal,

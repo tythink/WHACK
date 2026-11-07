@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>WHACK — 4-Slide Judge Pitch Deck</title>
+  <style>
+    :root {
+      --bg-paper: #f6f5f0;
+      --bg-card: #ffffff;
+      --bg-carbon: #141413;
+      --text-ink: #141413;
+      --text-muted: #575651;
+      --border: rgba(20, 20, 19, 0.12);
+      --coral: #f25533;
+      --emerald: #0f9d76;
+      --amber: #d97706;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      -webkit-font-smoothing: antialiased;
+      font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", sans-serif;
+    }
+
+    body {
+      background: var(--bg-paper);
+      color: var(--text-ink);
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 16px 40px;
+      background: var(--bg-carbon);
+      color: #faf9f5;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      font-weight: 700;
+      font-size: 14px;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+
+    .sev-tag {
+      background: rgba(242, 85, 51, 0.22);
+      color: #ff7a5c;
+      border: 1px solid rgba(242, 85, 51, 0.45);
+      padding: 3px 9px;
+      border-radius: 5px;
+      font-size: 11px;
+    }
+
+    .nav-controls {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+      font-size: 12px;
+    }
+
+    .nav-btn {
+      background: #242422;
+      color: #faf9f5;
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      padding: 6px 12px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    .nav-btn:hover {
+      background: var(--coral);
+      border-color: var(--coral);
+    }
+
+    .deck {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 40px 64px;
+    }
+
+    .slide {
+      display: none;
+      width: 100%;
+      max-width: 1120px;
+      flex-direction: column;
+      gap: 28px;
+    }
+
+    .slide.active {
+      display: flex;
+    }
+
+    .eyebrow {
+      font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--coral);
+    }
+
+    h1 {
+      font-size: 44px;
+      line-height: 1.12;
+      letter-spacing: -0.025em;
+      font-weight: 800;
+    }
+
+    .subtitle {
+      font-size: 19px;
+      line-height: 1.5;
+      color: var(--text-muted);
+      max-width: 820px;
+    }
+
+    .grid-2 {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 20px;
+    }
+
+    .grid-3 {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 18px;
+    }
+
+    .card {
+      background: var(--bg-card);
+      border: 1.5px solid var(--border);
+      border-radius: 12px;
+      padding: 24px;
+      box-shadow: 0 6px 20px rgba(0, 0, 0, 0.04);
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .card-num {
+      font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--emerald);
+    }
+
+    .card h3 {
+      font-size: 18px;
+      font-weight: 700;
+    }
+
+    .card p {
+      font-size: 14.5px;
+      line-height: 1.55;
+      color: var(--text-muted);
+    }
+
+    .code-strip {
+      background: var(--bg-carbon);
+      color: #f4f4f5;
+      padding: 16px 20px;
+      border-radius: 10px;
+      border-left: 4px solid var(--coral);
+      font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+      font-size: 13.5px;
+      line-height: 1.6;
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span>WHACK</span>
+      <span class="sev-tag">incident.io · Live Feed Agent with Personality</span>
+    </div>
+    <div class="nav-controls">
+      <button class="nav-btn" onclick="prevSlide()">← Prev</button>
+      <span id="slideIndicator">Slide 1 / 4</span>
+      <button class="nav-btn" onclick="nextSlide()">Next →</button>
+    </div>
+  </header>
+
+  <main class="deck">
+    <!-- Slide 1 -->
+    <section class="slide active">
+      <span class="eyebrow">01 · The Silent Stuck Loop</span>
+      <h1>Developers lose 30+ minutes repeating failing tests before realizing they're stuck.</h1>
+      <p class="subtitle">
+        Existing coding assistants wait for you to write a prompt. WHACK fuses on-device facial tension with live VS Code & terminal telemetry to detect when you're spinning your wheels—and surfaces the exact root cause in a calm, non-intrusive HUD.
+      </p>
+      <div class="grid-3">
+        <div class="card">
+          <span class="card-num">SIGNAL 01 · ON-DEVICE FACE</span>
+          <h3>Calibrated Brow & Squint</h3>
+          <p>20-second neutral baseline calibration. Detects sustained brow lowering & squint with hysteresis smoothing—100% local, zero frames stored or sent.</p>
+        </div>
+        <div class="card">
+          <span class="card-num">SIGNAL 02 · EDITOR & TERMINAL</span>
+          <h3>Behavioural Loop Detection</h3>
+          <p>Tracks repeated test failures with identical error hashes, rapid undo/redo bursts, cursor dwell, and Last-Known-Good (LKG) Git snapshots.</p>
+        </div>
+        <div class="card">
+          <span class="card-num">SIGNAL 03 · MULTIMODAL BRAIN</span>
+          <h3>Graduated 3-Tier Hints</h3>
+          <p>Delivers a subtle <strong>Nudge</strong>, a pointed <strong>Hint</strong>, or a <strong>Full Fix</strong> citing exact <code>file:line</code> evidence—plus a 1-line personality quip.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- Slide 2 -->
+    <section class="slide">
+      <span class="eyebrow">02 · Why Not Just Copy-Paste Into ChatGPT?</span>
+      <h1>Five things a chat window can never do.</h1>
+      <div class="grid-2">
+        <div class="card">
+          <span class="card-num">01 · PROACTIVE FUSION</span>
+          <h3>Notices you're stuck before you do</h3>
+          <p>Fuses decaying behavioural windows (same pytest error 3x + undo burst) with sustained facial tension to nudge at the exact right moment.</p>
+        </div>
+        <div class="card">
+          <span class="card-num">02 · ATTEMPT MEMORY</span>
+          <h3>Remembers everything you already tried</h3>
+          <p>The Attempt Log Summarizer condenses your last 10 minutes of edits and test runs so the Brain never suggests something you already ruled out.</p>
+        </div>
+        <div class="card">
+          <span class="card-num">03 · TEMPORAL DIFFING</span>
+          <h3>Shows what changed since it last worked</h3>
+          <p>Automatically snapshots passing test runs and computes the exact working-tree diff since your Last-Known-Good state.</p>
+        </div>
+        <div class="card">
+          <span class="card-num">04 · ZERO PROMPT FRICTION & PRIVACY-FIRST</span>
+          <h3>Context built automatically, 100% local camera</h3>
+          <p>Video never leaves on-device landmarks; screenshots happen only on trigger (<code>Ctrl+Shift+K</code> or auto-nudge) with automatic secret redaction.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- Slide 3 -->
+    <section class="slide">
+      <span class="eyebrow">03 · Real-Time Event Architecture</span>
+      <h1>One HTTP Ingest Contract. Live WebSocket HUD.</h1>
+      <div class="code-strip">
+        [Face Pipeline]  ──┐                                       ┌──▶ Floating Status Pill (Always-on-Top)<br/>
+        [VS Code + Term] ──┼── POST :3000/events ──▶ [Core Server] ┼──▶ incident.io × Grammarly HUD (ws://:3000/ws)<br/>
+        [Hotkey Ctrl+⇧+K]──┘   (100-Event Ring)          │         └──▶ Sandboxed Multimodal Brain (:5002/diagnose)
+      </div>
+      <div class="grid-3">
+        <div class="card">
+          <span class="card-num">FALSE-POSITIVE DEFENCE</span>
+          <h3>"Dismiss" Recalibration</h3>
+          <p>Clicking <em>Dismiss</em> triggers a 3-minute cooldown and dynamically nudges your confusion threshold upward so deep concentration isn't interrupted.</p>
+        </div>
+        <div class="card">
+          <span class="card-num">SANDBOXED INSPECTION</span>
+          <h3>Verified File:Line Citations</h3>
+          <p>The Brain uses path-sandboxed read-only tools (<code>git_diff</code>, <code>read_file_range</code>) and an explicit <code>Uncertain</code> badge when confidence is low.</p>
+        </div>
+        <div class="card">
+          <span class="card-num">ONE-CLICK RESOLUTION</span>
+          <h3>Direct VS Code Deep-Link</h3>
+          <p>Clicking <code>utils.py · L40–45</code> or <strong>Open in Editor</strong> jumps VS Code straight to the offending line.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- Slide 4 -->
+    <section class="slide">
+      <span class="eyebrow">04 · Live Demo Walkthrough</span>
+      <h1>From green tests to planted bug to instant fix.</h1>
+      <div class="grid-3">
+        <div class="card">
+          <span class="card-num">STEP 1 · BASELINE (SEV-3 NOMINAL)</span>
+          <h3>Tests Pass → LKG Snapshot Saved</h3>
+          <p>Developer runs <code>pytest</code> cleanly. Signals module records the Last-Known-Good commit + working tree hash. Floating pill stays <strong>Nominal (0.14)</strong>.</p>
+        </div>
+        <div class="card">
+          <span class="card-num">STEP 2 · THE STUCK LOOP (SEV-1 STUCK)</span>
+          <h3>Off-by-One Bug + Repeated Failure</h3>
+          <p>An edit in <code>utils.py</code> introduces an <code>IndexError</code>. After 3 failed runs, undo bursts, and brow furrow, Fusion escalates to <strong>SEV-1 · Stuck Detected</strong>.</p>
+        </div>
+        <div class="card">
+          <span class="card-num">STEP 3 · GRADUATED DIAGNOSIS</span>
+          <h3>Nudge → Hint → Full Fix</h3>
+          <p>HUD slides open with the live signal timeline, personality quip, cited <code>utils.py</code> range, and 1-click jump back into VS Code.</p>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const slides = Array.from(document.querySelectorAll(".slide"));
+    const indicator = document.getElementById("slideIndicator");
+    let current = 0;
+
+    function showSlide(idx) {
+      current = (idx + slides.length) % slides.length;
+      slides.forEach((s, i) => s.classList.toggle("active", i === current));
+      indicator.textContent = `Slide ${current + 1} / ${slides.length}`;
+    }
+
+    function nextSlide() { showSlide(current + 1); }
+    function prevSlide() { showSlide(current - 1); }
+
+    window.addEventListener("keydown", (e) => {
+      if (e.key === "ArrowRight" || e.key === " ") nextSlide();
+      if (e.key === "ArrowLeft") prevSlide();
+    });
+  </script>
+</body>
+</html>
