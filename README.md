@@ -1,105 +1,44 @@
-# WHACK ⚡ Autonomous Agent Crisis Takeover System
+# WHACK
 
-WHACK monitors user frustration, stress, and panic signals in real-time. When critical thresholds are breached, Antigravity autonomously takes control to diagnose the roadblock, inspect active windows, and solve the blocking step.
+A multimodal developer assistant that detects confusion through local facial expression analysis and editor/terminal telemetry, offering timely, context-aware nudges.
 
----
-
-## 🏗 Architecture Overview
+## Repository Structure
 
 ```
- ┌──────────────────────┐         ┌──────────────────────┐
- │ Stream B: Face       │         │ Stream C: Action     │
- │ Emotion Lead (:5001) │         │ Action Lead (:5002)  │
- └──────────┬───────────┘         └──────────┬───────────┘
-            │ EmotionEvent                   │ ActionEvent
-            │ (stressIndex)                  │ (panicScore)
-            ▼                                ▼
-     ┌──────────────────────────────────────────────┐
-     │      Stream D: Fusion Orchestrator (:8080)   │
-     │   fusionScore = (w1*stress) + (w2*panic)     │
-     │   If fusionScore > 0.8 -> Trigger Antigravity│
-     └──────────────────────┬───────────────────────┘
-                            │ TakeoverTriggerEvent
-                            ▼
-     ┌──────────────────────────────────────────────┐
-     │          Stream A: Frontend HUD (:3000)      │
-     │   Real-time stress meters & Takeover banner  │
-     └──────────────────────────────────────────────┘
+your-team-repo/
+├── .gitignore
+├── README.md
+│
+├── tools/
+│   └── board                           <-- Executable bash script
+│
+├── docs/
+│   └── agents/                         <-- Keep all role guides version-controlled
+│       ├── AGENT_ROLE1_FACE_FUSION.md
+│       ├── AGENT_ROLE2_SIGNALS.md
+│       ├── AGENT_ROLE3_BRAIN.md
+│       └── AGENT_ROLE4_FRONTEND_CORE.md
+│
+├── core/                               <-- Owned by Role 4 (Core Server & Electron)
+├── signals/                            <-- Owned by Role 2 (VS Code Extension & Attempt Log)
+├── brain/                              <-- Owned by Role 3 (LLM Multi-modal Diagnosis)
+├── demo-repo/                          <-- Owned by Role 3 (Planted bug test repo)
+└── face/                               <-- Owned by Role 1 (MediaPipe & Fusion Engine)
 ```
 
----
+## Roles & Ownership
 
-## 👥 Stream Allocation & Roles
+- **Role 1 (Face & Fusion)**: Owned by `@face-fusion-lead` (`face/`, `tools/replay/`). Detects confusion via MediaPipe landmarks/blendshapes and fuses with editor/terminal behaviors.
+- **Role 2 (Signals)**: Owned by `@signals-lead` (`signals/`). VS Code extension and attempt log tracker for editor & terminal telemetry.
+- **Role 3 (Brain)**: Owned by `@brain-lead` (`brain/`, `demo-repo/`). Multimodal LLM diagnosis and codebase context reasoning.
+- **Role 4 (Core & Frontend - Lead)**: Owned by `@frontend-core` (`core/`, shared contracts). Ingestion server and Electron HUD.
 
-| Stream | Role | Lead | Focus Area | Directory Ownership | Port |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **Stream B** | **Face (Role 1)** | `@emotion-lead` | Webcam emotion & stress EMA | `src/services/emotion/**` | `:5001` |
-| **Stream D** | **Fusion (Role 1)** | `@core-antigravity` | Multi-stream fusion & Agent trigger | `src/orchestrator/**`, `src/services/core_agent/**` | `:8080` |
-| **Stream C** | **Action (Role 2)** | `@action-lead` | OS telemetry, tab switches & jitter | `src/services/action/**` | `:5002` |
-| **Stream A** | **Frontend (Role 3)**| `@frontend-lead` | Reactive HUD & Takeover overlay | `src/frontend/**` | `:3000` |
+## Agent Communication
 
-See [agent.md](agent.md) for full team specifications and boundaries.
+Agents coordinate asynchronously using `./tools/board`:
 
----
-
-## 🚀 Quick Start (Role 1: Face & Fusion)
-
-### 1. Install Dependencies
 ```bash
-pip install -r requirements-emotion.txt
-pip install -r requirements-orchestrator.txt
-```
-
-### 2. Run Role 1 Services (Face & Fusion Together)
-```bash
-# Runs Stream B (:5001) in mock escalation demo mode + Stream D Orchestrator (:8080)
-python run_role1.py --mock
-
-# Or run with live camera detection:
-python run_role1.py --no-mock
-```
-
-### 3. Run Individual Services
-- **Stream B (Emotion)**:
-  ```bash
-  python src/services/emotion/server.py --port 5001 --mock
-  ```
-  - Emits `EmotionEvent` to `ws://localhost:5001/ws` and `http://localhost:5001/events`.
-- **Stream D (Fusion Orchestrator)**:
-  ```bash
-  python src/orchestrator/server.py --port 8080 --emotion-port 5001 --action-port 5002
-  ```
-  - Broadcasts `TakeoverTriggerEvent` to Frontend on `ws://localhost:8080/ws/stream` and `http://localhost:8080/events`.
-
-### 4. Docker Compose
-```bash
-docker compose up --build
-```
-
----
-
-## 📡 Shared Contracts (`src/contracts/events.ts`)
-
-- **`EmotionEvent`**:
-  - `stressIndex`: Exponential Moving Average (0.0 to 1.0)
-  - `confidence`: Clamped $\ge 0.5$
-  - `dominantEmotion`: `'neutral' | 'frustration' | 'anger' | 'stress' | 'panic'`
-- **`ActionEvent`**:
-  - `panicScore`: 0.0 to 1.0
-  - `tabSwitchRatePerMin`: rate of Alt-Tab / Cmd-Tab
-  - `activeWindow`: name of active window
-- **`TakeoverTriggerEvent`**:
-  - `fusionScore`: $(w_1 \cdot \text{stressIndex}) + (w_2 \cdot \text{panicScore})$
-  - `isTriggered`: `true` when $\text{fusionScore} > 0.8$
-  - `status`: `'monitoring' | 'arming' | 'takeover_triggered' | 'executing' | 'completed'`
-
----
-
-## 🛠 Communication Protocol (`tools/board`)
-
-Agent team coordination runs through `./tools/board` (Bash) or `.\tools\board.ps1` (PowerShell):
-```bash
-./tools/board post "[Stream B: Emotion] @core-antigravity Emotion stream is live on :5001."
-./tools/board wait @emotion-lead
-./tools/board read 5
+./tools/board post "<message>"
+./tools/board read [count]
+./tools/board wait @your-handle
 ```
