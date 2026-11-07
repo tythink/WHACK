@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# tools/board: Asynchronous agent communication over a pinned GitHub Issue
+set -e
+
+# Default to Issue #1 unless specified via environment variable
+ISSUE_NUM="${AGENT_BOARD_ISSUE:-1}"
+
+cmd="$1"
+shift || true
+
+if ! command -v gh &> /dev/null; then
+  echo "Error: GitHub CLI (gh) is not installed. Run 'brew install gh' or equivalent."
+  exit 1
+fi
+
+case "$cmd" in
+  post)
+    MESSAGE="$1"
+    if [ -z "$MESSAGE" ]; then
+      echo "Usage: ./tools/board post \"<message>\""
+      exit 1
+    fi
+    gh issue comment "$ISSUE_NUM" --body "$MESSAGE"
+    echo "✓ Posted message to Issue #$ISSUE_NUM"
+    ;;
+
+  read)
+    LIMIT="${1:-5}"
+    gh issue view "$ISSUE_NUM" --json comments --jq \
+      ".comments[-$LIMIT:] | .[] | \"[\(.author.login)] \(.createdAt):\n\(.body)\n----------------------------------------\""
+    ;;
+
+  wait)
+    TAG="$1"
+    if [ -z "$TAG" ]; then
+      echo "Usage: ./tools/board wait @handle"
+      exit 1
+    fi
+    echo "Waiting for message mentioning '$TAG' on Issue #$ISSUE_NUM (polling every 8s)..."
+    LAST_ID=""
+    while true; do
+      LATEST=$(gh issue view "$ISSUE_NUM" --json comments --jq '.comments[-1]')
+      BODY=$(echo "$LATEST" | jq -r '.body // empty')
+      ID=$(echo "$LATEST" | jq -r '.id // empty')
+
+      if [[ "$BODY" == *"$TAG"* ]] && [[ "$ID" != "$LAST_ID" ]]; then
+        echo ""
+        echo "🚨 Mention detected for $TAG!"
+        echo "$BODY"
+        break
+      fi
+      printf "."
+      sleep 8
+    done
+    ;;
+
+  *)
+    echo "Hackathon Agent Board CLI"
+    echo "Usage:"
+    echo "  ./tools/board post \"<message>\"   # Post an update or handoff"
+    echo "  ./tools/board read [count]       # Read the latest N messages"
+    echo "  ./tools/board wait @your-handle  # Poll until tagged"
+    exit 1
+    ;;
+esac
