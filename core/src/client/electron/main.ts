@@ -78,8 +78,8 @@ function createChipWindow(): void {
   const primaryDisplay = screen.getPrimaryDisplay();
   const { width: screenWidth } = primaryDisplay.workAreaSize;
 
-  const chipWidth = 276;
-  const chipHeight = 54;
+  const chipWidth = 248;
+  const chipHeight = 52;
   const margin = 20;
 
   chipWindow = new BrowserWindow({
@@ -121,10 +121,10 @@ function createPanelWindow(): void {
     width: panelWidth,
     height: panelHeight,
     x: screenWidth - panelWidth - margin,
-    y: 84,
+    y: 80,
     frame: false,
     transparent: false,
-    backgroundColor: "#0b0f19",
+    backgroundColor: "#0c0c0e",
     resizable: true,
     alwaysOnTop: true,
     show: false,
@@ -164,25 +164,25 @@ function createTray(): void {
   const updateTrayMenu = () => {
     const contextMenu = Menu.buildFromTemplate([
       {
-        label: "⚡ I'm Stuck — Diagnose Now (Ctrl+Shift+K)",
+        label: "Diagnose Now (Ctrl+Shift+K)",
         click: () => triggerManualDiagnosis("hint"),
       },
       {
-        label: panelWindow?.isVisible() ? "🙈 Hide HUD Panel" : "📊 Show HUD Panel",
+        label: panelWindow?.isVisible() ? "Hide HUD Panel" : "Show HUD Panel",
         click: () => togglePanelWindow(),
       },
       { type: "separator" },
       {
         label: simulatorTimer
-          ? "⏹ Stop Demo Sensor Simulator"
-          : "▶️ Start Demo Sensor Simulator",
+          ? "Stop Telemetry Simulator"
+          : "Start Telemetry Simulator",
         click: () => {
           toggleDemoSimulator();
           updateTrayMenu();
         },
       },
       {
-        label: "😌 I'm Not Confused (3m Cooldown)",
+        label: "Dismiss / Snooze 3m",
         click: () => {
           fetch(`${CORE_URL}/feedback`, {
             method: "POST",
@@ -192,7 +192,7 @@ function createTray(): void {
         },
       },
       {
-        label: "📷 Toggle Camera Pause",
+        label: "Toggle Camera Pause",
         click: () => {
           fetch(`${CORE_URL}/feedback`, {
             method: "POST",
@@ -203,7 +203,7 @@ function createTray(): void {
       },
       { type: "separator" },
       {
-        label: "Quit WHACK HUD",
+        label: "Quit WHACK",
         click: () => {
           (app as unknown as { isQuitting?: boolean }).isQuitting = true;
           app.quit();

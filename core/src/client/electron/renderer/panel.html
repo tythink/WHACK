@@ -2,463 +2,711 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>WHACK — Live Diagnosis & Signal Feed</title>
+  <title>WHACK — Assistant & Live Incident Feed</title>
   <style>
+    /* DEFAULT: incident.io "Paper & Carbon" + Grammarly Crisp White Card (Pops off Dark VS Code) */
     :root {
-      --bg-base: #0b0f19;
-      --bg-card: #111827;
-      --bg-elevated: #1e293b;
-      --border: rgba(148, 163, 184, 0.16);
-      --text-main: #f8fafc;
-      --text-muted: #94a3b8;
-      --accent: #6366f1;
-      --emerald: #10b981;
-      --amber: #f59e0b;
-      --coral: #ef4444;
+      --bg-app: #f6f5f0;
+      --bg-surface: #ffffff;
+      --bg-subtle: #efece6;
+      --bg-hover: #e5e2dc;
+      --border: rgba(20, 20, 19, 0.1);
+      --border-strong: rgba(20, 20, 19, 0.18);
+      --text-primary: #141413;
+      --text-secondary: #52524e;
+      --text-muted: #787771;
+      --primary-btn-bg: #141413;
+      --primary-btn-fg: #faf9f5;
+      --green: #0f9d76;
+      --green-bg: rgba(15, 157, 118, 0.12);
+      --amber: #d97706;
+      --amber-bg: rgba(217, 119, 6, 0.13);
+      --coral: #f25533;
+      --coral-bg: rgba(242, 85, 51, 0.12);
+      --blue: #2563eb;
+    }
+
+    /* OPTIONAL 1-CLICK TOGGLE: Full Carbon Dark Mode */
+    body.theme-dark {
+      --bg-app: #0c0c0e;
+      --bg-surface: #131316;
+      --bg-subtle: #18181c;
+      --bg-hover: #232329;
+      --border: rgba(255, 255, 255, 0.08);
+      --border-strong: rgba(255, 255, 255, 0.15);
+      --text-primary: #f4f4f5;
+      --text-secondary: #a1a1aa;
+      --text-muted: #71717a;
+      --primary-btn-bg: #f4f4f5;
+      --primary-btn-fg: #141413;
     }
 
     * {
       box-sizing: border-box;
       margin: 0;
       padding: 0;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+      -webkit-font-smoothing: antialiased;
+      font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", sans-serif;
     }
 
     body {
-      background: var(--bg-base);
-      color: var(--text-main);
+      background: var(--bg-app);
+      color: var(--text-primary);
       height: 100vh;
       display: flex;
       flex-direction: column;
       overflow: hidden;
-      border: 1px solid rgba(148, 163, 184, 0.22);
-      border-radius: 12px;
+      border: 1.5px solid var(--border-strong);
+      border-radius: 10px;
+      transition: background 0.18s ease, color 0.18s ease;
     }
 
-    /* Titlebar */
-    .titlebar {
+    /* 1. INCIDENT.IO DEEP CARBON HEADER (Always Deep Carbon #141413 for high-contrast anchor) */
+    .header {
+      position: relative;
       display: flex;
       align-items: center;
       justify-content: space-between;
-      padding: 12px 14px;
-      background: rgba(17, 24, 39, 0.95);
-      border-bottom: 1px solid var(--border);
+      padding: 11px 14px;
+      background: #141413;
+      color: #faf9f5;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
       -webkit-app-region: drag;
+      user-select: none;
     }
 
-    .brand {
+    .header-left {
       display: flex;
       align-items: center;
-      gap: 8px;
-      font-size: 13px;
-      font-weight: 700;
-      letter-spacing: 0.02em;
+      gap: 9px;
     }
 
-    .ws-dot {
-      width: 8px;
-      height: 8px;
-      border-radius: 50%;
-      background: var(--emerald);
-      box-shadow: 0 0 8px var(--emerald);
-    }
-
-    .ws-dot.disconnected {
-      background: var(--coral);
-      box-shadow: none;
-    }
-
-    .titlebar-actions {
-      display: flex;
+    .sev-pill {
+      display: inline-flex;
       align-items: center;
       gap: 6px;
-      -webkit-app-region: no-drag;
-    }
-
-    button {
-      border: none;
-      outline: none;
-      cursor: pointer;
-      border-radius: 7px;
-      font-size: 11px;
-      font-weight: 600;
-      padding: 6px 10px;
-      transition: all 0.15s ease;
-      color: var(--text-main);
-      background: var(--bg-elevated);
-      border: 1px solid var(--border);
-    }
-
-    button:hover {
-      background: #334155;
-    }
-
-    .btn-primary {
-      background: linear-gradient(135deg, #6366f1, #4f46e5);
-      border-color: rgba(99, 102, 241, 0.5);
-    }
-
-    .btn-primary:hover {
-      background: linear-gradient(135deg, #818cf8, #6366f1);
-    }
-
-    .btn-sim.active {
-      background: rgba(16, 185, 129, 0.2);
-      border-color: var(--emerald);
-      color: #6ee7b7;
-    }
-
-    /* Main Scrollable Content */
-    .content {
-      flex: 1;
-      overflow-y: auto;
-      padding: 12px 14px;
-      display: flex;
-      flex-direction: column;
-      gap: 12px;
-    }
-
-    /* Gauge Section */
-    .gauge-card {
-      background: var(--bg-card);
-      border: 1px solid var(--border);
-      border-radius: 10px;
-      padding: 10px 12px;
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-    }
-
-    .gauge-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      font-size: 12px;
-    }
-
-    .gauge-title {
-      color: var(--text-muted);
-      font-weight: 600;
-    }
-
-    .gauge-value {
+      padding: 3px 8px;
+      border-radius: 5px;
+      font-size: 10.5px;
       font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      background: rgba(15, 157, 118, 0.2);
+      color: #34d399;
+      border: 1px solid rgba(52, 211, 153, 0.3);
+      transition: all 0.2s ease;
+    }
+
+    .sev-pill.elevated {
+      background: rgba(217, 119, 6, 0.22);
+      color: #fbbf24;
+      border-color: rgba(251, 191, 36, 0.35);
+    }
+
+    .sev-pill.stuck {
+      background: rgba(242, 85, 51, 0.24);
+      color: #ff7a5c;
+      border-color: rgba(242, 85, 51, 0.45);
+    }
+
+    .sev-pill.snoozed {
+      background: rgba(255, 255, 255, 0.08);
+      color: #a1a1aa;
+      border-color: rgba(255, 255, 255, 0.14);
+    }
+
+    .sev-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: currentColor;
+    }
+
+    .score-readout {
+      font-family: ui-monospace, "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+      font-size: 11px;
+      color: #a1a19a;
       font-variant-numeric: tabular-nums;
     }
 
-    .gauge-track {
-      width: 100%;
-      height: 7px;
-      background: #1e293b;
-      border-radius: 999px;
-      overflow: hidden;
-    }
-
-    .gauge-fill {
-      height: 100%;
-      width: 0%;
-      background: var(--emerald);
-      border-radius: 999px;
-      transition: width 0.3s ease, background 0.3s ease;
-    }
-
-    .reasons-list {
+    .header-actions {
       display: flex;
-      flex-wrap: wrap;
+      align-items: center;
       gap: 5px;
+      -webkit-app-region: no-drag;
     }
 
-    .reason-pill {
-      font-size: 10px;
-      padding: 3px 8px;
-      border-radius: 999px;
-      background: rgba(239, 68, 68, 0.14);
-      border: 1px solid rgba(239, 68, 68, 0.35);
-      color: #fca5a5;
+    .header-meter {
+      position: absolute;
+      left: 0;
+      bottom: 0;
+      height: 2.5px;
+      width: 10%;
+      background: var(--green);
+      transition: width 0.35s ease, background 0.25s ease;
     }
 
-    /* 3-Level Hint Tabs */
-    .hint-tabs {
-      display: grid;
-      grid-template-columns: repeat(3, 1fr);
-      gap: 6px;
-      background: var(--bg-card);
-      padding: 4px;
-      border-radius: 9px;
-      border: 1px solid var(--border);
-    }
-
-    .hint-tab {
-      text-align: center;
-      padding: 6px 4px;
-      font-size: 11px;
+    .hdr-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 5px;
       border-radius: 6px;
-      background: transparent;
-      border: none;
-      color: var(--text-muted);
+      font-size: 11px;
+      font-weight: 500;
+      padding: 5px 8px;
+      cursor: pointer;
+      color: #d4d4ce;
+      background: #222220;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      transition: all 0.14s ease;
     }
 
-    .hint-tab.active {
-      background: var(--accent);
+    .hdr-btn:hover {
+      background: #2f2f2c;
       color: #ffffff;
     }
 
-    /* Diagnosis Card */
-    .diagnosis-card {
-      background: var(--bg-card);
+    .hdr-btn.primary {
+      background: var(--coral);
+      color: #ffffff;
+      border-color: var(--coral);
+      font-weight: 600;
+    }
+
+    .hdr-btn.primary:hover {
+      background: #e04626;
+    }
+
+    .hdr-btn.running {
+      background: rgba(15, 157, 118, 0.25);
+      color: #34d399;
+      border-color: rgba(52, 211, 153, 0.4);
+    }
+
+    .hdr-btn.icon-only {
+      padding: 5px;
+      width: 26px;
+      height: 26px;
+    }
+
+    .kbd {
+      font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+      font-size: 9.5px;
+      opacity: 0.8;
+    }
+
+    /* 2. INCIDENT.IO SIGNAL TRIGGER STRIP */
+    .signals-strip {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 7px 14px;
+      background: var(--bg-subtle);
+      border-bottom: 1px solid var(--border);
+      overflow-x: auto;
+      white-space: nowrap;
+    }
+
+    .signals-strip::-webkit-scrollbar {
+      display: none;
+    }
+
+    .strip-label {
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--text-muted);
+      margin-right: 2px;
+    }
+
+    .signal-tag {
+      display: inline-flex;
+      align-items: center;
+      font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+      font-size: 10.5px;
+      font-weight: 500;
+      padding: 2px 7px;
+      border-radius: 4px;
+      background: var(--bg-surface);
       border: 1px solid var(--border);
-      border-radius: 10px;
-      padding: 12px;
+      color: var(--text-secondary);
+    }
+
+    .signal-tag.alert {
+      background: var(--coral-bg);
+      border-color: rgba(242, 85, 51, 0.35);
+      color: var(--coral);
+      font-weight: 600;
+    }
+
+    /* 3. GRAMMARLY SUGGESTION POPOVER AREA */
+    .main-area {
+      flex: 1;
+      overflow-y: auto;
+      padding: 13px 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 11px;
+    }
+
+    /* Segmented Hint Control */
+    .segmented {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      padding: 3px;
+      background: var(--bg-subtle);
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      user-select: none;
+    }
+
+    .seg-btn {
+      background: transparent;
+      border: none;
+      border-radius: 5px;
+      padding: 5px 8px;
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text-muted);
+      cursor: pointer;
+      transition: all 0.14s ease;
+    }
+
+    .seg-btn:hover {
+      color: var(--text-primary);
+    }
+
+    .seg-btn.active {
+      background: var(--bg-surface);
+      color: var(--text-primary);
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+    }
+
+    /* Grammarly Crisp White Suggestion Card */
+    .suggestion-card {
+      background: var(--bg-surface);
+      border: 1px solid var(--border-strong);
+      border-radius: 9px;
+      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.05);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .card-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 13px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .citation-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      background: transparent;
+      border: none;
+      padding: 0;
+      color: var(--text-primary);
+      font-family: ui-monospace, "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+      font-size: 11.5px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+
+    .citation-btn:hover {
+      color: var(--coral);
+    }
+
+    .category-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--coral);
+      flex-shrink: 0;
+    }
+
+    .meta-tags {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .conf-tag {
+      font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+      font-size: 10.5px;
+      font-weight: 600;
+      color: var(--green);
+      background: var(--green-bg);
+      padding: 2px 7px;
+      border-radius: 4px;
+    }
+
+    .uncertain-tag {
+      display: none;
+      font-size: 10px;
+      font-weight: 700;
+      padding: 2px 6px;
+      border-radius: 4px;
+      background: var(--amber-bg);
+      color: var(--amber);
+    }
+
+    .card-body {
+      padding: 13px;
       display: flex;
       flex-direction: column;
       gap: 10px;
     }
 
-    .quip-box {
+    .agent-quip {
       font-size: 12px;
+      color: var(--text-secondary);
+      padding-bottom: 9px;
+      border-bottom: 1px dashed var(--border);
+      line-height: 1.45;
       font-style: italic;
-      color: #c7d2fe;
-      background: rgba(99, 102, 241, 0.12);
-      border-left: 3px solid var(--accent);
-      padding: 7px 10px;
-      border-radius: 4px;
     }
 
-    .evidence-row {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 8px;
-      flex-wrap: wrap;
-    }
-
-    .file-pill {
-      display: inline-flex;
-      align-items: center;
-      gap: 5px;
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      font-size: 11px;
-      padding: 4px 9px;
-      border-radius: 6px;
-      background: rgba(59, 130, 246, 0.15);
-      border: 1px solid rgba(59, 130, 246, 0.4);
-      color: #93c5fd;
-      cursor: pointer;
-    }
-
-    .file-pill:hover {
-      background: rgba(59, 130, 246, 0.28);
-    }
-
-    .badge-group {
-      display: flex;
-      gap: 6px;
-      align-items: center;
-    }
-
-    .conf-badge {
-      font-size: 10px;
-      padding: 3px 7px;
-      border-radius: 999px;
-      background: rgba(16, 185, 129, 0.14);
-      color: #6ee7b7;
-      border: 1px solid rgba(16, 185, 129, 0.3);
-    }
-
-    .uncertain-badge {
-      font-size: 10px;
-      padding: 3px 7px;
-      border-radius: 999px;
-      background: rgba(245, 158, 11, 0.18);
-      color: #fcd34d;
-      border: 1px solid rgba(245, 158, 11, 0.4);
-      display: none;
-    }
-
-    .markdown-body {
-      font-size: 12.5px;
-      line-height: 1.55;
-      color: #e2e8f0;
+    .diagnosis-content {
+      font-size: 13px;
+      line-height: 1.6;
+      color: var(--text-primary);
       white-space: pre-wrap;
     }
 
-    .markdown-body code {
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      background: rgba(30, 41, 59, 0.9);
+    .diagnosis-content code {
+      font-family: ui-monospace, "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+      font-size: 11.5px;
+      font-weight: 600;
+      background: var(--bg-subtle);
+      border: 1px solid var(--border);
       padding: 1px 5px;
       border-radius: 4px;
-      color: #f472b6;
-      font-size: 11.5px;
+      color: var(--coral);
     }
 
-    .markdown-body pre {
-      background: #090d16;
-      border: 1px solid var(--border);
-      border-radius: 7px;
-      padding: 8px 10px;
+    /* Dark IDE Code Snippet inside Light Grammarly Card for instant contrast */
+    .diagnosis-content pre {
+      margin-top: 8px;
+      padding: 10px 12px;
+      background: #141413;
+      border-left: 3px solid var(--green);
+      border-radius: 6px;
+      font-family: ui-monospace, "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+      font-size: 11.5px;
+      color: #f4f4f5;
       overflow-x: auto;
-      margin-top: 6px;
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      font-size: 11.5px;
-      color: #a5b4fc;
     }
 
-    /* Feedback Bar */
-    .feedback-bar {
+    /* Grammarly Action Footer */
+    .card-footer {
       display: flex;
-      gap: 6px;
-      flex-wrap: wrap;
-    }
-
-    .feedback-bar button {
-      flex: 1;
-      min-width: 85px;
-      text-align: center;
-    }
-
-    /* Live Feed Debug Drawer */
-    .drawer {
-      background: #080b12;
-      border-top: 1px solid var(--border);
-      display: flex;
-      flex-direction: column;
-      max-height: 220px;
-    }
-
-    .drawer-header {
-      display: flex;
-      justify-content: space-between;
       align-items: center;
-      padding: 8px 14px;
-      font-size: 11px;
-      font-weight: 700;
-      color: var(--text-muted);
-      cursor: pointer;
-      background: rgba(17, 24, 39, 0.7);
+      justify-content: space-between;
+      padding: 9px 13px;
+      background: var(--bg-subtle);
+      border-top: 1px solid var(--border);
+      gap: 6px;
     }
 
-    .feed-list {
-      overflow-y: auto;
-      padding: 6px 12px 10px;
+    .footer-left, .footer-right {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .btn-card {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 5px 10px;
+      border-radius: 6px;
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+      background: var(--primary-btn-bg);
+      color: var(--primary-btn-fg);
+      border: 1px solid var(--primary-btn-bg);
+      transition: opacity 0.14s ease;
+    }
+
+    .btn-card:hover {
+      opacity: 0.88;
+    }
+
+    .btn-ghost {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      background: transparent;
+      border: 1px solid transparent;
+      border-radius: 6px;
+      color: var(--text-secondary);
+      padding: 4px 7px;
+      font-size: 11px;
+      font-weight: 500;
+      cursor: pointer;
+    }
+
+    .btn-ghost:hover {
+      background: var(--bg-hover);
+      color: var(--text-primary);
+    }
+
+    /* 4. INCIDENT.IO LIVE VERTICAL ACTIVITY TIMELINE */
+    .timeline-pane {
+      height: 195px;
+      background: var(--bg-surface);
+      border-top: 1px solid var(--border-strong);
       display: flex;
       flex-direction: column;
-      gap: 5px;
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      font-size: 11px;
     }
 
-    .feed-item {
+    .timeline-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 7px 14px;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg-subtle);
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      user-select: none;
+    }
+
+    .timeline-header-left {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+    }
+
+    .live-indicator {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--green);
+    }
+
+    .live-indicator.offline {
+      background: var(--coral);
+    }
+
+    .timeline-scroll {
+      flex: 1;
+      overflow-y: auto;
+      padding: 9px 14px;
+    }
+
+    .timeline-rail {
+      position: relative;
+      padding-left: 15px;
+      border-left: 1.5px solid var(--border-strong);
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin-left: 4px;
+    }
+
+    .tl-item {
+      position: relative;
       display: flex;
       align-items: baseline;
-      gap: 7px;
-      padding: 4px 6px;
-      border-radius: 5px;
-      background: rgba(30, 41, 59, 0.45);
-      border-left: 2px solid #64748b;
+      justify-content: space-between;
+      gap: 8px;
+      font-size: 11px;
+      line-height: 1.35;
     }
 
-    .feed-item.src-face { border-left-color: #ec4899; }
-    .feed-item.src-editor { border-left-color: #3b82f6; }
-    .feed-item.src-terminal { border-left-color: #f59e0b; }
-    .feed-item.src-hotkey { border-left-color: #10b981; }
-    .feed-item.src-brain { border-left-color: #a855f7; }
+    .tl-node {
+      position: absolute;
+      left: -19.5px;
+      top: 3.5px;
+      width: 7.5px;
+      height: 7.5px;
+      border-radius: 50%;
+      background: var(--bg-surface);
+      border: 2px solid var(--text-muted);
+    }
 
-    .feed-time {
-      color: #64748b;
+    .tl-item.src-face .tl-node { border-color: var(--coral); }
+    .tl-item.src-editor .tl-node { border-color: var(--blue); }
+    .tl-item.src-terminal .tl-node { border-color: var(--amber); }
+    .tl-item.src-brain .tl-node { border-color: var(--green); }
+    .tl-item.src-hotkey .tl-node { border-color: var(--text-primary); }
+
+    .tl-main {
+      display: flex;
+      align-items: baseline;
+      gap: 6px;
+      min-width: 0;
+      flex: 1;
+    }
+
+    .tl-source {
+      font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
       font-size: 10px;
-      flex-shrink: 0;
-    }
-
-    .feed-tag {
       font-weight: 700;
-      font-size: 10px;
       text-transform: uppercase;
+      color: var(--text-primary);
       flex-shrink: 0;
     }
 
-    .feed-text {
-      color: #cbd5e1;
+    .tl-desc {
+      color: var(--text-secondary);
+      font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+      font-size: 11px;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
     }
+
+    .tl-time {
+      font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+      font-size: 10px;
+      color: var(--text-muted);
+      flex-shrink: 0;
+      font-variant-numeric: tabular-nums;
+    }
   </style>
 </head>
 <body>
-  <!-- Top Bar -->
-  <div class="titlebar">
-    <div class="brand">
-      <div id="wsDot" class="ws-dot" title="Connected to ws://localhost:3000/ws"></div>
-      <span>WHACK HUD</span>
+  <!-- 1. incident.io Deep Carbon Header -->
+  <header class="header">
+    <div class="header-left">
+      <div id="sevPill" class="sev-pill">
+        <span class="sev-dot"></span>
+        <span id="sevText">SEV-3 · Nominal</span>
+      </div>
+      <span id="scoreReadout" class="score-readout">idx 0.00</span>
     </div>
-    <div class="titlebar-actions">
-      <button id="btnSim" class="btn-sim" title="Simulate Face + Editor + Terminal traffic">▶️ Simulate</button>
-      <button id="btnDiagnose" class="btn-primary" title="Trigger Brain Diagnosis (Ctrl+Shift+K)">⚡ Diagnose</button>
-      <button id="btnClose" title="Minimize to Floating Chip">✕</button>
+
+    <div class="header-actions">
+      <button id="btnSim" class="hdr-btn" title="Run simulated telemetry stream">
+        <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor">
+          <polygon points="5 3 19 12 5 21 5 3"></polygon>
+        </svg>
+        <span id="simLabel">Simulate</span>
+      </button>
+
+      <button id="btnDiagnose" class="hdr-btn primary" title="Trigger diagnosis (Ctrl+Shift+K)">
+        <span>Diagnose</span>
+        <span class="kbd">⌃⇧K</span>
+      </button>
+
+      <button id="btnTheme" class="hdr-btn icon-only" title="Switch Paper Light / Carbon Dark Theme">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="5"></circle>
+          <line x1="12" y1="1" x2="12" y2="3"></line>
+          <line x1="12" y1="21" x2="12" y2="23"></line>
+          <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+          <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+          <line x1="1" y1="12" x2="3" y2="12"></line>
+          <line x1="21" y1="12" x2="23" y2="12"></line>
+        </svg>
+      </button>
+
+      <button id="btnClose" class="hdr-btn icon-only" title="Minimize to floating widget">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+          <path d="M18 6L6 18M6 6l12 12"/>
+        </svg>
+      </button>
+    </div>
+
+    <div id="headerMeter" class="header-meter"></div>
+  </header>
+
+  <!-- 2. incident.io Signal Trigger Strip -->
+  <div class="signals-strip">
+    <span class="strip-label">Signals</span>
+    <div id="reasonsContainer" style="display: flex; gap: 5px;">
+      <span class="signal-tag">face: calibrated</span>
+      <span class="signal-tag">editor: watching</span>
     </div>
   </div>
 
-  <!-- Main Content -->
-  <div class="content">
-    <!-- Live Confusion Score Gauge -->
-    <div class="gauge-card">
-      <div class="gauge-header">
-        <span id="gaugeStateText" class="gauge-title">Fusion Status: Calm</span>
-        <span id="gaugeScoreText" class="gauge-value">0.00 / 1.00</span>
-      </div>
-      <div class="gauge-track">
-        <div id="gaugeFill" class="gauge-fill"></div>
-      </div>
-      <div id="reasonsList" class="reasons-list">
-        <span class="reason-pill" style="background: rgba(148,163,184,0.12); border-color: rgba(148,163,184,0.25); color: #94a3b8;">
-          Watching face landmarks + editor/terminal signals...
-        </span>
-      </div>
+  <!-- 3. Grammarly Suggestion Popover Area -->
+  <main class="main-area">
+    <div class="segmented">
+      <button class="seg-btn" data-level="nudge">Nudge</button>
+      <button class="seg-btn active" data-level="hint">Hint</button>
+      <button class="seg-btn" data-level="full_explanation">Full Fix</button>
     </div>
 
-    <!-- 3-Level Hint Toggle -->
-    <div class="hint-tabs">
-      <button class="hint-tab" data-level="nudge">1 · Subtle Nudge</button>
-      <button class="hint-tab active" data-level="hint">2 · Pointed Hint</button>
-      <button class="hint-tab" data-level="full_explanation">3 · Full Fix</button>
-    </div>
+    <section class="suggestion-card">
+      <div class="card-top">
+        <button id="fileCitationBtn" class="citation-btn" title="Open file and line in VS Code">
+          <span id="categoryDot" class="category-dot"></span>
+          <span id="fileLabel">demo-repo/utils.py · L40–45</span>
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="opacity: 0.65;">
+            <path d="M7 17L17 7M7 7h10v10"/>
+          </svg>
+        </button>
 
-    <!-- AI Brain Diagnosis Card -->
-    <div class="diagnosis-card">
-      <div id="quipBox" class="quip-box">
-        "Press Ctrl+Shift+K (or click ⚡ Diagnose) anytime you're stuck."
-      </div>
-
-      <div class="evidence-row">
-        <span id="filePill" class="file-pill" title="Click to open file & line in VS Code">
-          📄 demo-repo/utils.py:40-45
-        </span>
-        <div class="badge-group">
-          <span id="uncertainBadge" class="uncertain-badge">⚠️ Uncertain</span>
-          <span id="confBadge" class="conf-badge">Ready</span>
+        <div class="meta-tags">
+          <span id="uncertainTag" class="uncertain-tag">Uncertain</span>
+          <span id="confTag" class="conf-tag">Standby</span>
         </div>
       </div>
 
-      <div id="diagnosisBody" class="markdown-body">Waiting for trigger (`Ctrl+Shift+K`) or auto-nudge from the Fusion Engine...</div>
+      <div class="card-body">
+        <div id="quipText" class="agent-quip">
+          Monitoring local face blendshapes and editor/terminal telemetry. Press Ctrl+Shift+K anytime for an instant root-cause check.
+        </div>
+        <div id="diagnosisContent" class="diagnosis-content">No active incident diagnosis. Trigger manually or click Simulate above to test live nudges.</div>
+      </div>
+
+      <div class="card-footer">
+        <div class="footer-left">
+          <button id="btnOpenEditor" class="btn-card" title="Jump to offending line in VS Code">
+            <span>Open in Editor</span>
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M5 12h14M12 5l7 7-7 7"/>
+            </svg>
+          </button>
+          <button id="btnHelpful" class="btn-ghost" title="Mark suggestion as accurate">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="20 6 9 17 4 12"></polyline>
+            </svg>
+            <span>Helpful</span>
+          </button>
+        </div>
+
+        <div class="footer-right">
+          <button id="btnNotConfused" class="btn-ghost" title="Dismiss and recalibrate threshold (3m cooldown)">
+            Dismiss
+          </button>
+          <button id="btnSnooze" class="btn-ghost" title="Snooze nudges for 3m">
+            Snooze 3m
+          </button>
+          <button id="btnCamera" class="btn-ghost" title="Pause or resume local camera pipeline">
+            Pause Cam
+          </button>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- 4. incident.io Live Activity Timeline -->
+  <section class="timeline-pane">
+    <div class="timeline-header">
+      <div class="timeline-header-left">
+        <span id="liveDot" class="live-indicator"></span>
+        <span>Incident & Signal Timeline</span>
+      </div>
+      <span id="eventCounter">0 events</span>
     </div>
 
-    <!-- Feedback Controls -->
-    <div class="feedback-bar">
-      <button id="btnNotConfused" title="Dismiss & nudge threshold (3m cooldown)">😌 Not Confused</button>
-      <button id="btnSnooze" title="Snooze nudges for 3 minutes">💤 Snooze 3m</button>
-      <button id="btnCamera" title="Pause/Resume on-device camera scoring">📷 Pause Cam</button>
-      <button id="btnHelpful" title="Mark diagnosis as helpful">👍 Helpful</button>
+    <div class="timeline-scroll">
+      <div id="timelineRail" class="timeline-rail"></div>
     </div>
-  </div>
-
-  <!-- Live Feed Debug Drawer (incident.io Live Feed) -->
-  <div class="drawer">
-    <div id="drawerToggle" class="drawer-header">
-      <span>📡 LIVE SIGNAL & EVENT FEED (ws://localhost:3000/ws)</span>
-      <span id="eventCountLabel">0 events</span>
-    </div>
-    <div id="feedList" class="feed-list"></div>
-  </div>
+  </section>
 
   <script>
     const CORE_HTTP = "http://127.0.0.1:3000";
@@ -469,115 +717,135 @@
     let currentLine = 42;
     let streamingBuffer = "";
 
-    const wsDot = document.getElementById("wsDot");
+    const sevPill = document.getElementById("sevPill");
+    const sevText = document.getElementById("sevText");
+    const scoreReadout = document.getElementById("scoreReadout");
+    const headerMeter = document.getElementById("headerMeter");
     const btnSim = document.getElementById("btnSim");
+    const simLabel = document.getElementById("simLabel");
     const btnDiagnose = document.getElementById("btnDiagnose");
+    const btnTheme = document.getElementById("btnTheme");
     const btnClose = document.getElementById("btnClose");
-    const gaugeStateText = document.getElementById("gaugeStateText");
-    const gaugeScoreText = document.getElementById("gaugeScoreText");
-    const gaugeFill = document.getElementById("gaugeFill");
-    const reasonsList = document.getElementById("reasonsList");
-    const quipBox = document.getElementById("quipBox");
-    const filePill = document.getElementById("filePill");
-    const uncertainBadge = document.getElementById("uncertainBadge");
-    const confBadge = document.getElementById("confBadge");
-    const diagnosisBody = document.getElementById("diagnosisBody");
-    const feedList = document.getElementById("feedList");
-    const eventCountLabel = document.getElementById("eventCountLabel");
+    const reasonsContainer = document.getElementById("reasonsContainer");
+    const fileCitationBtn = document.getElementById("fileCitationBtn");
+    const fileLabel = document.getElementById("fileLabel");
+    const uncertainTag = document.getElementById("uncertainTag");
+    const confTag = document.getElementById("confTag");
+    const quipText = document.getElementById("quipText");
+    const diagnosisContent = document.getElementById("diagnosisContent");
+    const timelineRail = document.getElementById("timelineRail");
+    const eventCounter = document.getElementById("eventCounter");
+    const liveDot = document.getElementById("liveDot");
+    const btnCamera = document.getElementById("btnCamera");
 
-    function renderSimpleMarkdown(text) {
+    btnTheme.addEventListener("click", () => {
+      document.body.classList.toggle("theme-dark");
+    });
+
+    function formatMarkdown(text) {
       const escaped = text
         .replace(/&/g, "&amp;")
         .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;");
+        .replace(/>/g, "&gt;")
+        .replace(/^###\s+(.+)$/gm, "<strong>$1</strong>");
       return escaped
         .replace(/```(\w*)\n([\s\S]*?)```/g, "<pre>$2</pre>")
         .replace(/`([^`]+)`/g, "<code>$1</code>")
         .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
     }
 
-    function updateGauge(score, faceState, cooldownUntil, cameraPaused, eventCount) {
+    function updateHeaderStatus(score, faceState, cooldownUntil, cameraPaused, eventCount) {
       const val = Math.max(0, Math.min(1, Number(score || 0)));
-      gaugeScoreText.textContent = `${val.toFixed(2)} / 1.00`;
-      gaugeFill.style.width = `${Math.round(val * 100)}%`;
+      scoreReadout.textContent = cameraPaused ? "cam paused" : `idx ${val.toFixed(2)}`;
+      headerMeter.style.width = `${Math.max(5, Math.round(val * 100))}%`;
+      btnCamera.textContent = cameraPaused ? "Resume Cam" : "Pause Cam";
 
       if (typeof eventCount === "number") {
-        eventCountLabel.textContent = `${eventCount} events`;
+        eventCounter.textContent = `${eventCount} events`;
       }
+
+      sevPill.className = "sev-pill";
 
       if (cooldownUntil && cooldownUntil > Date.now()) {
         const secs = Math.ceil((cooldownUntil - Date.now()) / 1000);
-        gaugeStateText.textContent = `Snoozed (${secs}s cooldown)`;
-        gaugeFill.style.background = "#64748b";
+        sevPill.classList.add("snoozed");
+        sevText.textContent = `Snoozed · ${secs}s`;
+        headerMeter.style.background = "#71717a";
         return;
       }
 
       if (faceState === "confused" || val >= 0.7) {
-        gaugeStateText.textContent = "Fusion Status: Stuck / Confused";
-        gaugeFill.style.background = "#ef4444";
+        sevPill.classList.add("stuck");
+        sevText.textContent = "SEV-1 · Stuck Detected";
+        headerMeter.style.background = "#f25533";
       } else if (val >= 0.4) {
-        gaugeStateText.textContent = "Fusion Status: Deep Focus";
-        gaugeFill.style.background = "#f59e0b";
+        sevPill.classList.add("elevated");
+        sevText.textContent = "SEV-2 · Deep Focus";
+        headerMeter.style.background = "#d97706";
       } else {
-        gaugeStateText.textContent = cameraPaused
-          ? "Fusion Status: Calm (Cam Paused)"
-          : "Fusion Status: Calm";
-        gaugeFill.style.background = "#10b981";
+        sevText.textContent = "SEV-3 · Nominal";
+        headerMeter.style.background = "#0f9d76";
       }
     }
 
-    function renderReasons(reasons) {
+    function renderSignalTags(reasons) {
       if (!Array.isArray(reasons) || reasons.length === 0) return;
-      reasonsList.innerHTML = "";
+      reasonsContainer.innerHTML = "";
       reasons.forEach((r) => {
-        const pill = document.createElement("span");
-        pill.className = "reason-pill";
-        pill.textContent = `⚡ ${r}`;
-        reasonsList.appendChild(pill);
+        const tag = document.createElement("span");
+        tag.className = "signal-tag alert";
+        tag.textContent = r;
+        reasonsContainer.appendChild(tag);
       });
     }
 
-    function appendFeedEvent(event) {
-      const row = document.createElement("div");
-      row.className = `feed-item src-${event.source || "editor"}`;
+    function appendTimelineItem(event) {
+      const item = document.createElement("div");
+      const src = event.source || "editor";
+      item.className = `tl-item src-${src}`;
 
       const time = new Date(event.timestamp || Date.now()).toLocaleTimeString([], {
         hour12: false,
       });
       const p = event.payload || {};
-      let detail = event.type || "";
+      let desc = event.type || "";
 
-      if (event.source === "face") {
-        detail = `state=${p.state || "calm"} score=${Number(p.score ?? 0).toFixed(2)}`;
-      } else if (event.source === "editor") {
-        detail = `${p.activeFile || "file"} | diag=${p.diagnosticsCount ?? 0} ${
-          p.isUndo ? "[UNDO]" : ""
+      if (src === "face") {
+        desc = `${p.state || "calm"} · score ${Number(p.score ?? 0).toFixed(2)} (conf ${Number(
+          p.confidence ?? 0.9
+        ).toFixed(2)})`;
+      } else if (src === "editor") {
+        desc = `${p.activeFile || "file"} · ${p.diagnosticsCount ?? 0} errors${
+          p.isUndo ? " · undo" : ""
         }`;
-      } else if (event.source === "terminal") {
-        detail = `$ ${p.command || "cmd"} -> exit ${p.exitCode ?? 0} (${p.durationMs ?? 0}ms)`;
-      } else if (event.source === "hotkey") {
-        detail = `Manual hotkey (${p.shortcut || "Ctrl+Shift+K"})`;
-      } else if (event.source === "brain") {
-        detail = `${p.file || "diagnosis"}: ${p.summary || "complete"}`;
+      } else if (src === "terminal") {
+        desc = `${p.command || "cmd"} · exit ${p.exitCode ?? 0} (${p.durationMs ?? 0}ms)`;
+      } else if (src === "hotkey") {
+        desc = `manual trigger (${p.shortcut || "Ctrl+Shift+K"})`;
+      } else if (src === "brain") {
+        desc = `diagnosis ready · ${p.file || "repo"}`;
       }
 
-      row.innerHTML = `
-        <span class="feed-time">${time}</span>
-        <span class="feed-tag">[${event.source}]</span>
-        <span class="feed-text">${detail}</span>
+      item.innerHTML = `
+        <span class="tl-node"></span>
+        <div class="tl-main">
+          <span class="tl-source">${src}</span>
+          <span class="tl-desc">${desc}</span>
+        </div>
+        <span class="tl-time">${time}</span>
       `;
 
-      feedList.prepend(row);
-      while (feedList.children.length > 40) {
-        feedList.removeChild(feedList.lastChild);
+      timelineRail.prepend(item);
+      while (timelineRail.children.length > 40) {
+        timelineRail.removeChild(timelineRail.lastChild);
       }
     }
 
     async function requestDiagnosis(hintLevel) {
       currentHintLevel = hintLevel || currentHintLevel;
       streamingBuffer = "";
-      diagnosisBody.textContent = "🧠 Inspecting context & streaming diagnosis...";
-      confBadge.textContent = "Streaming...";
+      diagnosisContent.textContent = "Inspecting recent edits, terminal output, and active file...";
+      confTag.textContent = "Analyzing...";
 
       try {
         await fetch(`${CORE_HTTP}/diagnose`, {
@@ -589,7 +857,7 @@
           }),
         });
       } catch (err) {
-        diagnosisBody.textContent = "Failed to contact Core Server on localhost:3000.";
+        diagnosisContent.textContent = "Unable to reach local Core Server on port 3000.";
       }
     }
 
@@ -601,67 +869,67 @@
           body: JSON.stringify({ action }),
         });
       } catch (err) {
-        console.error("Feedback error:", err);
+        console.error(err);
       }
     }
 
-    // Wire up Hint Level Tabs
-    document.querySelectorAll(".hint-tab").forEach((btn) => {
+    document.querySelectorAll(".seg-btn").forEach((btn) => {
       btn.addEventListener("click", () => {
-        document.querySelectorAll(".hint-tab").forEach((b) => b.classList.remove("active"));
+        document.querySelectorAll(".seg-btn").forEach((b) => b.classList.remove("active"));
         btn.classList.add("active");
         const level = btn.getAttribute("data-level") || "hint";
         requestDiagnosis(level);
       });
     });
 
-    // Wire up Top Bar & Feedback Buttons
     btnDiagnose.addEventListener("click", () => requestDiagnosis(currentHintLevel));
     btnClose.addEventListener("click", () => {
       if (window.whackElectron) window.whackElectron.hidePanel();
     });
+
     btnSim.addEventListener("click", async () => {
       if (window.whackElectron) {
         const running = await window.whackElectron.toggleSimulator();
-        btnSim.classList.toggle("active", running);
-        btnSim.textContent = running ? "⏹ Stop Sim" : "▶️ Simulate";
+        btnSim.classList.toggle("running", running);
+        simLabel.textContent = running ? "Stop Sim" : "Simulate";
       }
     });
 
-    filePill.addEventListener("click", () => {
+    const openCurrentFile = () => {
       if (window.whackElectron && currentFile) {
         window.whackElectron.openInVsCode(currentFile, currentLine);
       }
-    });
+    };
+    fileCitationBtn.addEventListener("click", openCurrentFile);
+    document.getElementById("btnOpenEditor").addEventListener("click", openCurrentFile);
 
     document.getElementById("btnNotConfused").addEventListener("click", () => {
       sendFeedback("not_confused");
-      quipBox.textContent = "Got it — snoozed nudges for 3m and nudged your focus threshold.";
+      quipText.textContent = "Recalibrated baseline threshold and muted auto-nudges for 3 minutes.";
     });
     document.getElementById("btnSnooze").addEventListener("click", () => sendFeedback("snooze"));
-    document.getElementById("btnCamera").addEventListener("click", () => sendFeedback("toggle_camera"));
+    btnCamera.addEventListener("click", () => sendFeedback("toggle_camera"));
     document.getElementById("btnHelpful").addEventListener("click", () => {
       sendFeedback("helpful");
-      confBadge.textContent = "Thanks! 👍";
+      confTag.textContent = "Marked helpful";
     });
 
     if (window.whackElectron) {
-      window.whackElectron.onTriggerDiagnose((hintLevel) => {
+      window.whackElectron.onTriggerDiagnose(() => {
         streamingBuffer = "";
-        diagnosisBody.textContent = "🧠 Triggered via Hotkey — streaming diagnosis...";
+        diagnosisContent.textContent = "Hotkey triggered — analyzing context...";
       });
       window.whackElectron.onSimulatorStatus((running) => {
-        btnSim.classList.toggle("active", running);
-        btnSim.textContent = running ? "⏹ Stop Sim" : "▶️ Simulate";
+        btnSim.classList.toggle("running", running);
+        simLabel.textContent = running ? "Stop Sim" : "Simulate";
       });
     }
 
-    // Connect WebSocket for live events & streaming diagnosis
     function connectWs() {
       const ws = new WebSocket(CORE_WS);
 
       ws.onopen = () => {
-        wsDot.classList.remove("disconnected");
+        liveDot.classList.remove("offline");
       };
 
       ws.onmessage = (ev) => {
@@ -669,7 +937,7 @@
           const msg = JSON.parse(ev.data);
 
           if (msg.type === "status") {
-            updateGauge(
+            updateHeaderStatus(
               msg.confusionScore,
               msg.faceState,
               msg.cooldownUntil,
@@ -677,51 +945,52 @@
               msg.eventCount
             );
           } else if (msg.type === "event_ingest") {
-            appendFeedEvent(msg.event);
+            appendTimelineItem(msg.event);
           } else if (msg.type === "nudge") {
-            renderReasons(msg.reasons);
+            renderSignalTags(msg.reasons);
             requestDiagnosis(currentHintLevel);
           } else if (msg.type === "diagnosis_chunk") {
             streamingBuffer += msg.chunk;
-            diagnosisBody.innerHTML = renderSimpleMarkdown(streamingBuffer);
+            diagnosisContent.innerHTML = formatMarkdown(streamingBuffer);
           } else if (msg.type === "diagnosis_done") {
             const d = msg.diagnosis;
             streamingBuffer = d.summary || streamingBuffer;
-            diagnosisBody.innerHTML = renderSimpleMarkdown(streamingBuffer);
-            quipBox.textContent = `"${d.quip || "Let's squash this bug."}"`;
+            diagnosisContent.innerHTML = formatMarkdown(streamingBuffer);
+            quipText.textContent = d.quip || "Root cause isolated from recent diff and test output.";
 
             if (d.file) {
               currentFile = d.file;
               currentLine = Array.isArray(d.lines) ? d.lines[0] : 1;
-              const rangeStr = Array.isArray(d.lines) ? `:${d.lines[0]}-${d.lines[1]}` : "";
-              filePill.textContent = `📄 ${d.file}${rangeStr}`;
+              const rangeStr = Array.isArray(d.lines)
+                ? ` · L${d.lines[0]}–${d.lines[1]}`
+                : "";
+              fileLabel.textContent = `${d.file}${rangeStr}`;
             }
 
             if (Array.isArray(d.reasons) && d.reasons.length > 0) {
-              renderReasons(d.reasons);
+              renderSignalTags(d.reasons);
             }
 
-            uncertainBadge.style.display = d.uncertain ? "inline-block" : "none";
+            uncertainTag.style.display = d.uncertain ? "inline-block" : "none";
             const confPct = Math.round((d.confidence ?? 0.95) * 100);
-            confBadge.textContent = `${confPct}% confidence`;
+            confTag.textContent = `${confPct}% confidence`;
           }
         } catch (err) {
-          console.error("WS message error:", err);
+          console.error(err);
         }
       };
 
       ws.onclose = () => {
-        wsDot.classList.add("disconnected");
+        liveDot.classList.add("offline");
         setTimeout(connectWs, 1500);
       };
     }
 
-    // Load initial event history on open
     fetch(`${CORE_HTTP}/events`)
       .then((r) => r.json())
       .then((data) => {
         if (Array.isArray(data.events)) {
-          data.events.slice(-20).forEach((e) => appendFeedEvent(e));
+          data.events.slice(-20).forEach((e) => appendTimelineItem(e));
         }
       })
       .catch(() => undefined);

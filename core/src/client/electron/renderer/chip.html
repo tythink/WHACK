@@ -2,14 +2,27 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>WHACK Floating Chip</title>
+  <title>WHACK Floating Widget</title>
   <style>
+    :root {
+      --bg-pill: #faf9f5;
+      --border-pill: rgba(20, 20, 19, 0.14);
+      --text-main: #141413;
+      --text-muted: #71716b;
+      --btn-dark: #141413;
+      --btn-dark-hover: #292927;
+      --green: #0f9d76;
+      --amber: #d97706;
+      --coral: #f25533;
+    }
+
     * {
       box-sizing: border-box;
       margin: 0;
       padding: 0;
       user-select: none;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+      -webkit-font-smoothing: antialiased;
+      font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", sans-serif;
     }
 
     html, body {
@@ -19,213 +32,253 @@
       overflow: hidden;
     }
 
-    .chip {
+    /* High-contrast Warm Paper pill that pops off dark-mode VS Code */
+    .widget {
       display: flex;
       align-items: center;
       justify-content: space-between;
-      gap: 10px;
-      height: 48px;
-      margin: 3px 4px;
-      padding: 0 12px;
+      height: 42px;
+      margin: 5px 6px;
+      padding: 0 5px 0 10px;
       border-radius: 999px;
-      background: rgba(15, 23, 42, 0.94);
-      border: 1px solid rgba(148, 163, 184, 0.22);
-      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
-      color: #f8fafc;
+      background: var(--bg-pill);
+      border: 1.5px solid var(--border-pill);
+      box-shadow: 0 10px 26px rgba(0, 0, 0, 0.38), 0 2px 6px rgba(0, 0, 0, 0.2);
+      color: var(--text-main);
       -webkit-app-region: drag;
-      transition: border-color 0.25s ease, box-shadow 0.25s ease;
+      transition: border-color 0.2s ease, box-shadow 0.2s ease;
     }
 
-    .chip.state-confused {
-      border-color: rgba(239, 68, 68, 0.75);
-      box-shadow: 0 0 20px rgba(239, 68, 68, 0.35);
+    .widget.is-stuck {
+      border-color: var(--coral);
+      box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45), 0 0 0 3px rgba(242, 85, 51, 0.28);
     }
 
-    .status-group {
+    .left {
       display: flex;
       align-items: center;
       gap: 8px;
-      min-width: 0;
     }
 
-    .orb {
-      width: 10px;
-      height: 10px;
-      border-radius: 50%;
-      background: #10b981;
-      box-shadow: 0 0 10px #10b981;
-      flex-shrink: 0;
-      transition: background 0.25s ease, box-shadow 0.25s ease;
-    }
-
-    .orb.focusing {
-      background: #f59e0b;
-      box-shadow: 0 0 10px #f59e0b;
-    }
-
-    .orb.confused {
-      background: #ef4444;
-      box-shadow: 0 0 12px #ef4444;
-      animation: pulse 1.2s infinite ease-in-out;
-    }
-
-    .orb.cooldown {
-      background: #64748b;
-      box-shadow: none;
-    }
-
-    @keyframes pulse {
-      0%, 100% { transform: scale(1); opacity: 1; }
-      50% { transform: scale(1.3); opacity: 0.75; }
-    }
-
-    .meta {
+    .ring-wrap {
+      position: relative;
+      width: 24px;
+      height: 24px;
       display: flex;
-      flex-direction: column;
-      line-height: 1.15;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
     }
 
-    .state-label {
-      font-size: 12px;
+    .ring-svg {
+      position: absolute;
+      inset: 0;
+      transform: rotate(-90deg);
+    }
+
+    .ring-bg {
+      fill: none;
+      stroke: rgba(20, 20, 19, 0.1);
+      stroke-width: 2.4;
+    }
+
+    .ring-fg {
+      fill: none;
+      stroke: var(--green);
+      stroke-width: 2.4;
+      stroke-linecap: round;
+      stroke-dasharray: 50.26;
+      stroke-dashoffset: 50.26;
+      transition: stroke-dashoffset 0.35s ease, stroke 0.25s ease;
+    }
+
+    .core-dot {
+      width: 6.5px;
+      height: 6.5px;
+      border-radius: 50%;
+      background: var(--green);
+      transition: background 0.25s ease;
+    }
+
+    .status-meta {
+      display: flex;
+      align-items: baseline;
+      gap: 6px;
+    }
+
+    .status-badge {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.03em;
+      text-transform: uppercase;
+      color: var(--text-main);
+    }
+
+    .score-mono {
+      font-family: ui-monospace, "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+      font-size: 11px;
       font-weight: 600;
-      letter-spacing: 0.01em;
-      color: #f1f5f9;
-    }
-
-    .score-label {
-      font-size: 10px;
-      color: #94a3b8;
+      color: var(--text-muted);
       font-variant-numeric: tabular-nums;
     }
 
-    .actions {
+    .controls {
       display: flex;
       align-items: center;
-      gap: 6px;
+      gap: 4px;
       -webkit-app-region: no-drag;
     }
 
-    button {
-      border: none;
-      outline: none;
-      cursor: pointer;
+    .btn-diagnose {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      height: 29px;
+      padding: 0 10px;
       border-radius: 999px;
+      background: var(--btn-dark);
+      border: 1px solid var(--btn-dark);
+      color: #faf9f5;
       font-size: 11px;
       font-weight: 600;
-      padding: 5px 10px;
-      transition: all 0.15s ease;
+      cursor: pointer;
+      transition: background 0.15s ease, transform 0.12s ease;
     }
 
-    .btn-stuck {
-      background: linear-gradient(135deg, #6366f1, #4f46e5);
-      color: #ffffff;
+    .btn-diagnose:hover {
+      background: var(--btn-dark-hover);
     }
 
-    .btn-stuck:hover {
-      background: linear-gradient(135deg, #818cf8, #6366f1);
-      transform: translateY(-1px);
+    .kbd {
+      font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+      font-size: 9.5px;
+      color: #d4d4d0;
+      background: rgba(255, 255, 255, 0.12);
+      padding: 1px 4px;
+      border-radius: 3px;
     }
 
-    .btn-hud {
-      background: rgba(51, 65, 85, 0.75);
-      color: #e2e8f0;
-      border: 1px solid rgba(148, 163, 184, 0.2);
+    .btn-expand {
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      background: transparent;
+      border: 1px solid transparent;
+      color: #52524e;
+      cursor: pointer;
+      transition: background 0.15s ease, color 0.15s ease;
     }
 
-    .btn-hud:hover {
-      background: rgba(71, 85, 105, 0.9);
+    .btn-expand:hover {
+      background: rgba(20, 20, 19, 0.08);
+      color: var(--text-main);
     }
   </style>
 </head>
 <body>
-  <div id="chipContainer" class="chip">
-    <div class="status-group">
-      <div id="statusOrb" class="orb"></div>
-      <div class="meta">
-        <span id="stateLabel" class="state-label">WHACK · Calm</span>
-        <span id="scoreLabel" class="score-label">Score: 0.00</span>
+  <div id="widget" class="widget">
+    <div class="left">
+      <div class="ring-wrap">
+        <svg class="ring-svg" width="24" height="24" viewBox="0 0 22 22">
+          <circle class="ring-bg" cx="11" cy="11" r="8"></circle>
+          <circle id="ringFg" class="ring-fg" cx="11" cy="11" r="8"></circle>
+        </svg>
+        <div id="coreDot" class="core-dot"></div>
+      </div>
+      <div class="status-meta">
+        <span id="statusText" class="status-badge">Nominal</span>
+        <span id="scoreText" class="score-mono">0.00</span>
       </div>
     </div>
-    <div class="actions">
-      <button id="btnStuck" class="btn-stuck" title="Trigger AI Diagnosis (Ctrl+Shift+K)">⚡ Stuck</button>
-      <button id="btnHud" class="btn-hud" title="Open Live HUD Panel">HUD</button>
+
+    <div class="controls">
+      <button id="btnDiagnose" class="btn-diagnose" title="Run Diagnosis (Ctrl+Shift+K)">
+        <span>Ask</span>
+        <span class="kbd">⌃⇧K</span>
+      </button>
+      <button id="btnExpand" class="btn-expand" title="Toggle Incident & Suggestion Panel">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="3" width="18" height="18" rx="2"/>
+          <path d="M9 3v18"/>
+        </svg>
+      </button>
     </div>
   </div>
 
   <script>
-    const chipContainer = document.getElementById("chipContainer");
-    const statusOrb = document.getElementById("statusOrb");
-    const stateLabel = document.getElementById("stateLabel");
-    const scoreLabel = document.getElementById("scoreLabel");
-    const btnStuck = document.getElementById("btnStuck");
-    const btnHud = document.getElementById("btnHud");
+    const widget = document.getElementById("widget");
+    const ringFg = document.getElementById("ringFg");
+    const coreDot = document.getElementById("coreDot");
+    const statusText = document.getElementById("statusText");
+    const scoreText = document.getElementById("scoreText");
+    const btnDiagnose = document.getElementById("btnDiagnose");
+    const btnExpand = document.getElementById("btnExpand");
 
-    btnStuck.addEventListener("click", () => {
-      if (window.whackElectron) {
-        window.whackElectron.triggerDiagnose("hint");
-      }
+    const CIRCUMFERENCE = 50.26;
+
+    btnDiagnose.addEventListener("click", () => {
+      if (window.whackElectron) window.whackElectron.triggerDiagnose("hint");
     });
 
-    btnHud.addEventListener("click", () => {
-      if (window.whackElectron) {
-        window.whackElectron.togglePanel();
-      }
+    btnExpand.addEventListener("click", () => {
+      if (window.whackElectron) window.whackElectron.togglePanel();
     });
 
-    function updateUiState(score, faceState, cooldownUntil, cameraPaused) {
-      const pct = Number(score || 0).toFixed(2);
-      scoreLabel.textContent = cameraPaused
-        ? `Cam Paused · ${pct}`
-        : `Score: ${pct}`;
+    function setRing(score, color) {
+      const clamped = Math.max(0.06, Math.min(1, Number(score || 0)));
+      ringFg.style.strokeDashoffset = String(CIRCUMFERENCE * (1 - clamped));
+      ringFg.style.stroke = color;
+      coreDot.style.background = color;
+    }
 
-      statusOrb.className = "orb";
-      chipContainer.classList.remove("state-confused");
+    function updateState(score, faceState, cooldownUntil, cameraPaused) {
+      const val = Number(score || 0);
+      scoreText.textContent = cameraPaused ? "PAUSED" : val.toFixed(2);
+      widget.classList.remove("is-stuck");
 
       if (cooldownUntil && cooldownUntil > Date.now()) {
-        statusOrb.classList.add("cooldown");
-        stateLabel.textContent = "Snoozed";
+        statusText.textContent = "Snoozed";
+        setRing(0.1, "#71716b");
         return;
       }
 
-      if (faceState === "confused" || score >= 0.7) {
-        statusOrb.classList.add("confused");
-        chipContainer.classList.add("state-confused");
-        stateLabel.textContent = "Stuck? (Ctrl+⇧+K)";
-      } else if (score >= 0.4) {
-        statusOrb.classList.add("focusing");
-        stateLabel.textContent = "WHACK · Focusing";
+      if (faceState === "confused" || val >= 0.7) {
+        statusText.textContent = "Stuck";
+        widget.classList.add("is-stuck");
+        setRing(val, "#f25533");
+      } else if (val >= 0.4) {
+        statusText.textContent = "Drifting";
+        setRing(val, "#d97706");
       } else {
-        stateLabel.textContent = "WHACK · Calm";
+        statusText.textContent = "Nominal";
+        setRing(Math.max(0.14, val), "#0f9d76");
       }
     }
 
     function connectWs() {
       const ws = new WebSocket("ws://127.0.0.1:3000/ws");
-
       ws.onmessage = (event) => {
         try {
           const msg = JSON.parse(event.data);
           if (msg.type === "status") {
-            updateUiState(
+            updateState(
               msg.confusionScore,
               msg.faceState,
               msg.cooldownUntil,
               msg.cameraPaused
             );
           } else if (msg.type === "nudge") {
-            updateUiState(msg.score || 0.85, "confused", null, false);
-            if (window.whackElectron) {
-              window.whackElectron.showPanel();
-            }
+            updateState(msg.score || 0.85, "confused", null, false);
+            if (window.whackElectron) window.whackElectron.showPanel();
           }
-        } catch (err) {
-          console.error("Failed to parse WS message:", err);
+        } catch (e) {
+          console.error(e);
         }
       };
-
-      ws.onclose = () => {
-        setTimeout(connectWs, 1500);
-      };
+      ws.onclose = () => setTimeout(connectWs, 1500);
     }
 
     connectWs();
