@@ -1,39 +1,40 @@
-"""Validation test suite for 8 scripted stuck developer scenarios."""
+"""Validation test suite for 8 developer stuck scenarios evaluated against realistic demo code."""
 
 import sys
 from pathlib import Path
 
-# Add demo-repo to sys.path for direct module import
-DEMO_REPO_PATH = Path(__file__).resolve().parent.parent.parent / "demo-repo"
-if str(DEMO_REPO_PATH) not in sys.path:
-    sys.path.insert(0, str(DEMO_REPO_PATH))
+from brain.config import DEMO_REPO_DIR
+
+# Add demo repository (generated path outside repo) to sys.path for direct module import
+if str(DEMO_REPO_DIR) not in sys.path:
+    sys.path.insert(0, str(DEMO_REPO_DIR))
 
 import pytest
 import asyncio
 from brain.models import DiagnoseRequest, EditorState, TerminalState
 from brain.agent import DiagnosticEngine
 from scenarios import (
-    run_scenario_1_off_by_one,
-    run_scenario_2_scoping,
-    run_scenario_3_none_dereference,
-    run_scenario_4_mutable_default,
-    run_scenario_5_unawaited,
-    run_scenario_6_zero_division,
-    run_scenario_7_regex,
-    run_scenario_8_type_mismatch,
+    calculate_window_slices,
+    accumulate_metrics,
+    extract_event_timestamp,
+    append_audit_entry,
+    poll_remote_metrics,
+    compute_throughput_rate,
+    parse_status_code,
+    check_priority_threshold,
 )
 
 engine = DiagnosticEngine()
 
 def test_scenario_1_off_by_one():
     with pytest.raises(IndexError) as exc:
-        run_scenario_1_off_by_one()
+        calculate_window_slices()
     
     req = DiagnoseRequest(
         hintLevel="hint",
         editorState=EditorState(activeFile="utils.py", cursorLine=18),
         terminalState=TerminalState(
-            command="python demo-repo/scenarios.py",
+            command="python -m scenarios",
             exitCode=1,
             tailOutput=str(exc.value),
         ),
@@ -46,13 +47,13 @@ def test_scenario_1_off_by_one():
 
 def test_scenario_3_none_dereference():
     with pytest.raises(TypeError) as exc:
-        run_scenario_3_none_dereference()
+        extract_event_timestamp()
 
     req = DiagnoseRequest(
         hintLevel="nudge",
         editorState=EditorState(activeFile="scenarios.py"),
         terminalState=TerminalState(
-            command="python demo-repo/scenarios.py",
+            command="python -m scenarios",
             exitCode=1,
             tailOutput="TypeError: 'NoneType' object is not subscriptable",
         ),
@@ -63,12 +64,12 @@ def test_scenario_3_none_dereference():
 
 def test_scenario_6_zero_division():
     with pytest.raises(ZeroDivisionError) as exc:
-        run_scenario_6_zero_division()
+        compute_throughput_rate()
 
     req = DiagnoseRequest(
         hintLevel="full_explanation",
         terminalState=TerminalState(
-            command="python demo-repo/scenarios.py",
+            command="python -m scenarios",
             exitCode=1,
             tailOutput="ZeroDivisionError: division by zero",
         ),
@@ -79,12 +80,12 @@ def test_scenario_6_zero_division():
 
 def test_scenario_5_unawaited():
     with pytest.raises(TypeError) as exc:
-        run_scenario_5_unawaited()
+        poll_remote_metrics()
 
     req = DiagnoseRequest(
         hintLevel="hint",
         terminalState=TerminalState(
-            command="python demo-repo/scenarios.py",
+            command="python -m scenarios",
             exitCode=1,
             tailOutput="TypeError: 'coroutine' object is not subscriptable\nRuntimeWarning: coroutine was never awaited",
         ),
@@ -94,14 +95,14 @@ def test_scenario_5_unawaited():
 
 def test_scenario_7_regex():
     with pytest.raises(AttributeError) as exc:
-        run_scenario_7_regex()
+        parse_status_code()
 
     req = DiagnoseRequest(
         hintLevel="hint",
         terminalState=TerminalState(
-            command="python demo-repo/scenarios.py",
+            command="python -m scenarios",
             exitCode=1,
-            tailOutput=f"AttributeError: 'NoneType' object has no attribute 'group'",
+            tailOutput="AttributeError: 'NoneType' object has no attribute 'group'",
         ),
     )
     diag = asyncio.run(engine.diagnose(req))
@@ -109,12 +110,12 @@ def test_scenario_7_regex():
 
 def test_scenario_8_type_mismatch():
     with pytest.raises(TypeError) as exc:
-        run_scenario_8_type_mismatch()
+        check_priority_threshold()
 
     req = DiagnoseRequest(
         hintLevel="full_explanation",
         terminalState=TerminalState(
-            command="python demo-repo/scenarios.py",
+            command="python -m scenarios",
             exitCode=1,
             tailOutput="TypeError: '>' not supported between instances of 'str' and 'int'",
         ),
@@ -123,14 +124,14 @@ def test_scenario_8_type_mismatch():
     assert "type mismatch" in diag.summary.lower() or "string" in diag.summary.lower()
 
 def test_scenario_4_mutable_default():
-    first = run_scenario_4_mutable_default("first")
-    second = run_scenario_4_mutable_default("second")
-    assert len(second) == 2  # Bug: state persisted
+    first = append_audit_entry("first")
+    second = append_audit_entry("second")
+    assert len(second) == 2  # State persisted across invocations
 
     req = DiagnoseRequest(
         hintLevel="nudge",
         terminalState=TerminalState(
-            command="python demo-repo/scenarios.py",
+            command="python -m scenarios",
             exitCode=1,
             tailOutput="AssertionError: mutable default argument persisted elements across calls",
         ),

@@ -30,9 +30,9 @@ def test_post_diagnose_nudge():
         "hintLevel": "nudge",
         "editorState": {"activeFile": "utils.py", "cursorLine": 18},
         "terminalState": {
-            "command": "pytest demo-repo/tests",
+            "command": "pytest tests/",
             "exitCode": 1,
-            "tailOutput": "IndexError: Offset end 6 exceeds data length 5 (line 30)",
+            "tailOutput": "IndexError: Offset end 6 exceeds data length 5",
         },
     }
     res = client.post("/diagnose", json=payload)

@@ -5,8 +5,15 @@ from pathlib import Path
 
 # Paths
 BASE_DIR = Path(__file__).resolve().parent.parent
-DEMO_REPO_DIR = (BASE_DIR / "demo-repo").resolve()
 BRAIN_DIR = (BASE_DIR / "brain").resolve()
+
+# Target demo repository outside this workspace (configurable, defaulting to ~/whack-demo-repo)
+DEFAULT_GENERATED_DEMO_REPO = Path(os.path.expanduser("~/whack-demo-repo")).resolve()
+DEMO_REPO_DIR = Path(
+    os.environ.get("WHACK_DEMO_REPO")
+    or os.environ.get("DEMO_REPO_DIR")
+    or (DEFAULT_GENERATED_DEMO_REPO if DEFAULT_GENERATED_DEMO_REPO.exists() else (BASE_DIR / "demo-repo"))
+).resolve()
 
 # Service URLs and Ports
 CORE_SERVER_URL = os.environ.get("CORE_SERVER_URL", "http://localhost:3000")
