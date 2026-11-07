@@ -35,3 +35,9 @@ All agents interact asynchronously via GitHub issue comments using the `tools/bo
 ./tools/board read [count]
 ./tools/board wait @handle
 ```
+
+## Operating Rules & Guidelines
+- **Always Confirm the Plan**: Every time, please confirm the plan with me before starting or executing tasks.
+- **Clarify When Unclear**: If there is anything unclear, you should always ask me and confirm the details with me.
+- **Cross-Agent Communication**: If you have any question with other AI agents, please raise an issue using `tools/board` or GitHub Issues.
+

@@ -80,3 +80,12 @@ conda env export --no-builds > environment-face.yml
 ```bash
 ./tools/board wait @face-fusion-lead
 ```
+
+---
+
+## 6. Operating Rules & Human-in-the-Loop Protocol
+- **Always Confirm the Plan**: Every time, please confirm the plan with me before starting or executing tasks.
+- **Clarify When Unclear**: If there is anything unclear, you should always ask me and confirm the details with me.
+- **Cross-Agent Communication**: If you have any question with other AI agents, please raise an issue using `tools/board` / GitHub Issues.
+
+
