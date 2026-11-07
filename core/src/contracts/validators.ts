@@ -1,6 +1,12 @@
 import { BaseEvent, EventSource, FeedbackPayload } from "./events";
 
-const VALID_SOURCES: EventSource[] = ["face", "editor", "terminal", "hotkey"];
+const VALID_SOURCES: EventSource[] = [
+  "face",
+  "editor",
+  "terminal",
+  "hotkey",
+  "brain",
+];
 
 /**
  * Checks whether an incoming HTTP POST body is a valid `BaseEvent`.

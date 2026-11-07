@@ -139,7 +139,30 @@ async function runVerification() {
     );
     console.log("✓ [5/6] POST /feedback ('not_confused') applied cooldown & reset state");
 
-    // 6. Test 100-Event Ring Buffer Cap
+    // 6. Test Role 3 Brain broadcast_to_core (`source: "brain"`, `type: "diagnosis"`)
+    const brainEventRes = await fetch(`${baseUrl}/events`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        source: "brain",
+        type: "diagnosis",
+        timestamp: Date.now(),
+        payload: {
+          summary: "Off-by-one in utils.py",
+          file: "utils.py",
+          lines: [40, 45],
+          quip: "Check your loop bounds!",
+          uncertain: false,
+          confidence: 0.96,
+          hintLevel: "full_explanation",
+          explanation: "Change `range(len(items) + 1)` to `range(len(items))`.",
+        },
+      }),
+    });
+    assert.strictEqual(brainEventRes.status, 200);
+    console.log("✓ [6/7] Role 3 Brain broadcast_to_core event ingested & pushed to HUD");
+
+    // 7. Test 100-Event Ring Buffer Cap
     for (let i = 0; i < 105; i++) {
       await fetch(`${baseUrl}/events`, {
         method: "POST",

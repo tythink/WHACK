@@ -7,7 +7,7 @@
  * and WebSocket (ws://localhost:3000/ws).
  */
 
-export type EventSource = "face" | "editor" | "terminal" | "hotkey";
+export type EventSource = "face" | "editor" | "terminal" | "hotkey" | "brain";
 
 export type HintLevel = "nudge" | "hint" | "full_explanation";
 
@@ -44,6 +44,8 @@ export interface EditorPayload {
   cursorDwellMs: number;
   topDiagnostics?: string[];
   cursorLine?: number;
+  cursorColumn?: number;
+  selectionText?: string;
 }
 
 /**
@@ -67,19 +69,30 @@ export interface HotkeyPayload {
 }
 
 /**
- * 6. BRAIN DIAGNOSIS REQUEST (Sent from Core Server -> Role 3: @brain-lead)
+ * 6. BRAIN DIAGNOSIS REQUEST (Sent from Core Server -> Role 3: @brain-lead on :5002)
  */
 export interface DiagnosisRequest {
   triggerType: "hotkey" | "auto_nudge";
   hintLevel: HintLevel;
   fusionReasons?: string[];
-  attemptLog?: string;
+  attemptLog?: string | BaseEvent[];
   lastKnownGoodDiff?: string;
+  screenshot?: string;
   screenshotPath?: string;
+  editorState?: EditorPayload | null;
+  terminalState?: TerminalPayload | null;
   latestFace?: FacePayload | null;
   latestEditor?: EditorPayload | null;
   latestTerminal?: TerminalPayload | null;
   recentEvents?: BaseEvent[];
+  stream?: boolean;
+}
+
+export interface CodeCitation {
+  file: string;
+  lines: [number, number];
+  snippet?: string;
+  note?: string;
 }
 
 /**
@@ -94,6 +107,8 @@ export interface DiagnosisResponse {
   hintLevel: HintLevel;
   reasons?: string[];
   confidence?: number;
+  explanation?: string;
+  citations?: CodeCitation[];
 }
 
 /**

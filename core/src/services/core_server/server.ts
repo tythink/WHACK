@@ -1,6 +1,7 @@
 import http, { IncomingMessage, ServerResponse } from "http";
 import {
   DiagnosisRequest,
+  DiagnosisResponse,
   HintLevel,
   normalizeFeedbackPayload,
   normalizeIncomingEvent,
@@ -107,8 +108,51 @@ export function createCoreServer(capacity = 100) {
         // Broadcast updated status snapshot
         wsHub.broadcastStatus();
 
-        // Check if this event is an explicit nudge or high-confusion trigger (when not in cooldown)
         const payloadObj = (event.payload || {}) as Record<string, unknown>;
+
+        // If Role 3's Brain service pushed a direct diagnosis event via `broadcast_to_core`
+        if (event.source === "brain" && event.type === "diagnosis") {
+          const summaryText =
+            typeof payloadObj.explanation === "string" &&
+            payloadObj.hintLevel === "full_explanation"
+              ? `${String(payloadObj.summary || "")}\n\n${payloadObj.explanation}`
+              : String(payloadObj.summary || "");
+
+          const diagPayload: DiagnosisResponse = {
+            summary: summaryText,
+            file:
+              typeof payloadObj.file === "string" ? payloadObj.file : undefined,
+            lines: Array.isArray(payloadObj.lines)
+              ? (payloadObj.lines as [number, number])
+              : undefined,
+            quip:
+              typeof payloadObj.quip === "string"
+                ? payloadObj.quip
+                : "Computers do what you say, not what you want.",
+            uncertain: Boolean(payloadObj.uncertain),
+            hintLevel:
+              payloadObj.hintLevel === "nudge" ||
+              payloadObj.hintLevel === "hint" ||
+              payloadObj.hintLevel === "full_explanation"
+                ? payloadObj.hintLevel
+                : "hint",
+            confidence:
+              typeof payloadObj.confidence === "number"
+                ? payloadObj.confidence
+                : 0.95,
+            explanation:
+              typeof payloadObj.explanation === "string"
+                ? payloadObj.explanation
+                : undefined,
+          };
+
+          wsHub.broadcast({
+            type: "diagnosis_done",
+            diagnosis: diagPayload,
+          });
+        }
+
+        // Check if this event is an explicit nudge or high-confusion trigger (when not in cooldown)
         if (!store.isInCooldown()) {
           if (event.type === "nudge" || Array.isArray(payloadObj.reasons)) {
             const reasons = Array.isArray(payloadObj.reasons)
@@ -167,6 +211,8 @@ export function createCoreServer(capacity = 100) {
             typeof body.screenshotPath === "string"
               ? body.screenshotPath
               : undefined,
+          editorState: snap.latestEditor,
+          terminalState: snap.latestTerminal,
           latestFace: snap.latestFace,
           latestEditor: snap.latestEditor,
           latestTerminal: snap.latestTerminal,
@@ -231,7 +277,7 @@ export function createCoreServer(capacity = 100) {
   };
 }
 
-// Start server directly when run via `npm start` or `tsx src/services/core_server/server.ts`
+// Start server directly when run via `npm start` or `node dist/services/core_server/server.js`
 if (require.main === module) {
   const port = Number(process.env.PORT || 3000);
   const core = createCoreServer(100);

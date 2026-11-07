@@ -6,10 +6,10 @@ import {
 import { WsHub } from "./wsHub";
 
 const BRAIN_SERVICE_URL =
-  process.env.BRAIN_SERVICE_URL || "http://localhost:8000/diagnose";
+  process.env.BRAIN_SERVICE_URL || "http://localhost:5002/diagnose";
 
 /**
- * Calls Role 3's Brain Service (`BRAIN_SERVICE_URL`) if reachable,
+ * Calls Role 3's Brain Service (`http://localhost:5002/diagnose`) if reachable,
  * or falls back seamlessly to the Role 3 / Role 4 Stub diagnosis streamer
  * so `/diagnose` and Checkpoint A work even when running Core solo.
  */
@@ -17,26 +17,42 @@ export async function runDiagnosis(
   req: DiagnosisRequest,
   wsHub: WsHub
 ): Promise<DiagnosisResponse> {
-  // 1. Try forwarding to Role 3's external Brain service if it's running (with a fast 2.5s connect timeout)
+  // 1. Try forwarding to Role 3's external Brain service on :5002 if it's running
   if (process.env.USE_BRAIN_STUB !== "true") {
     try {
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 2500);
+      const timeout = setTimeout(() => controller.abort(), 3500);
       const res = await fetch(BRAIN_SERVICE_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(req),
+        body: JSON.stringify({
+          hintLevel: req.hintLevel,
+          attemptLog: req.attemptLog ?? req.recentEvents,
+          editorState: req.editorState ?? req.latestEditor,
+          terminalState: req.terminalState ?? req.latestTerminal,
+          stream: false,
+        }),
         signal: controller.signal,
       });
       clearTimeout(timeout);
 
       if (res.ok) {
         const data = (await res.json()) as Partial<DiagnosisResponse>;
+        const activeFile =
+          data.file ??
+          req.editorState?.activeFile ??
+          req.latestEditor?.activeFile ??
+          "utils.py";
+
+        const combinedSummary =
+          data.explanation && req.hintLevel === "full_explanation"
+            ? `${data.summary || ""}\n\n${data.explanation}`
+            : data.summary ||
+              "Index error on line 42: loop bound exceeds list length.";
+
         const diagnosis: DiagnosisResponse = {
-          summary:
-            data.summary ||
-            "Index error on line 42: loop bound exceeds list length.",
-          file: data.file ?? req.latestEditor?.activeFile ?? "utils.py",
+          summary: combinedSummary,
+          file: activeFile,
           lines: data.lines ?? [40, 45],
           quip:
             data.quip || "Computers do what you say, not what you want.",
@@ -44,6 +60,8 @@ export async function runDiagnosis(
           hintLevel: data.hintLevel ?? req.hintLevel ?? "hint",
           reasons: data.reasons ?? req.fusionReasons,
           confidence: data.confidence ?? 0.95,
+          explanation: data.explanation,
+          citations: data.citations,
         };
 
         wsHub.broadcast({
@@ -62,7 +80,8 @@ export async function runDiagnosis(
   }
 
   // 2. Built-in Streaming Stub (matches AGENT_ROLE3_BRAIN.md 0:00-0:45 stub + 3 hint levels)
-  const activeFile = req.latestEditor?.activeFile || "utils.py";
+  const activeFile =
+    req.editorState?.activeFile || req.latestEditor?.activeFile || "utils.py";
   const hintLevel: HintLevel = req.hintLevel || "hint";
 
   const summaryByLevel: Record<HintLevel, string> = {
@@ -103,6 +122,13 @@ export async function runDiagnosis(
         ? req.fusionReasons
         : ["manual hotkey trigger", "repeated test failure"],
     confidence: 0.95,
+    citations: [
+      {
+        file: activeFile,
+        lines: [40, 45],
+        note: "Off-by-one upper bound in range()",
+      },
+    ],
   };
 
   wsHub.broadcast({

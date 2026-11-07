@@ -1,0 +1,732 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>WHACK — Live Diagnosis & Signal Feed</title>
+  <style>
+    :root {
+      --bg-base: #0b0f19;
+      --bg-card: #111827;
+      --bg-elevated: #1e293b;
+      --border: rgba(148, 163, 184, 0.16);
+      --text-main: #f8fafc;
+      --text-muted: #94a3b8;
+      --accent: #6366f1;
+      --emerald: #10b981;
+      --amber: #f59e0b;
+      --coral: #ef4444;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+    }
+
+    body {
+      background: var(--bg-base);
+      color: var(--text-main);
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      border: 1px solid rgba(148, 163, 184, 0.22);
+      border-radius: 12px;
+    }
+
+    /* Titlebar */
+    .titlebar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 14px;
+      background: rgba(17, 24, 39, 0.95);
+      border-bottom: 1px solid var(--border);
+      -webkit-app-region: drag;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+    }
+
+    .ws-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--emerald);
+      box-shadow: 0 0 8px var(--emerald);
+    }
+
+    .ws-dot.disconnected {
+      background: var(--coral);
+      box-shadow: none;
+    }
+
+    .titlebar-actions {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      -webkit-app-region: no-drag;
+    }
+
+    button {
+      border: none;
+      outline: none;
+      cursor: pointer;
+      border-radius: 7px;
+      font-size: 11px;
+      font-weight: 600;
+      padding: 6px 10px;
+      transition: all 0.15s ease;
+      color: var(--text-main);
+      background: var(--bg-elevated);
+      border: 1px solid var(--border);
+    }
+
+    button:hover {
+      background: #334155;
+    }
+
+    .btn-primary {
+      background: linear-gradient(135deg, #6366f1, #4f46e5);
+      border-color: rgba(99, 102, 241, 0.5);
+    }
+
+    .btn-primary:hover {
+      background: linear-gradient(135deg, #818cf8, #6366f1);
+    }
+
+    .btn-sim.active {
+      background: rgba(16, 185, 129, 0.2);
+      border-color: var(--emerald);
+      color: #6ee7b7;
+    }
+
+    /* Main Scrollable Content */
+    .content {
+      flex: 1;
+      overflow-y: auto;
+      padding: 12px 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    /* Gauge Section */
+    .gauge-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 10px 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .gauge-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 12px;
+    }
+
+    .gauge-title {
+      color: var(--text-muted);
+      font-weight: 600;
+    }
+
+    .gauge-value {
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .gauge-track {
+      width: 100%;
+      height: 7px;
+      background: #1e293b;
+      border-radius: 999px;
+      overflow: hidden;
+    }
+
+    .gauge-fill {
+      height: 100%;
+      width: 0%;
+      background: var(--emerald);
+      border-radius: 999px;
+      transition: width 0.3s ease, background 0.3s ease;
+    }
+
+    .reasons-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 5px;
+    }
+
+    .reason-pill {
+      font-size: 10px;
+      padding: 3px 8px;
+      border-radius: 999px;
+      background: rgba(239, 68, 68, 0.14);
+      border: 1px solid rgba(239, 68, 68, 0.35);
+      color: #fca5a5;
+    }
+
+    /* 3-Level Hint Tabs */
+    .hint-tabs {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 6px;
+      background: var(--bg-card);
+      padding: 4px;
+      border-radius: 9px;
+      border: 1px solid var(--border);
+    }
+
+    .hint-tab {
+      text-align: center;
+      padding: 6px 4px;
+      font-size: 11px;
+      border-radius: 6px;
+      background: transparent;
+      border: none;
+      color: var(--text-muted);
+    }
+
+    .hint-tab.active {
+      background: var(--accent);
+      color: #ffffff;
+    }
+
+    /* Diagnosis Card */
+    .diagnosis-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .quip-box {
+      font-size: 12px;
+      font-style: italic;
+      color: #c7d2fe;
+      background: rgba(99, 102, 241, 0.12);
+      border-left: 3px solid var(--accent);
+      padding: 7px 10px;
+      border-radius: 4px;
+    }
+
+    .evidence-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .file-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 11px;
+      padding: 4px 9px;
+      border-radius: 6px;
+      background: rgba(59, 130, 246, 0.15);
+      border: 1px solid rgba(59, 130, 246, 0.4);
+      color: #93c5fd;
+      cursor: pointer;
+    }
+
+    .file-pill:hover {
+      background: rgba(59, 130, 246, 0.28);
+    }
+
+    .badge-group {
+      display: flex;
+      gap: 6px;
+      align-items: center;
+    }
+
+    .conf-badge {
+      font-size: 10px;
+      padding: 3px 7px;
+      border-radius: 999px;
+      background: rgba(16, 185, 129, 0.14);
+      color: #6ee7b7;
+      border: 1px solid rgba(16, 185, 129, 0.3);
+    }
+
+    .uncertain-badge {
+      font-size: 10px;
+      padding: 3px 7px;
+      border-radius: 999px;
+      background: rgba(245, 158, 11, 0.18);
+      color: #fcd34d;
+      border: 1px solid rgba(245, 158, 11, 0.4);
+      display: none;
+    }
+
+    .markdown-body {
+      font-size: 12.5px;
+      line-height: 1.55;
+      color: #e2e8f0;
+      white-space: pre-wrap;
+    }
+
+    .markdown-body code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      background: rgba(30, 41, 59, 0.9);
+      padding: 1px 5px;
+      border-radius: 4px;
+      color: #f472b6;
+      font-size: 11.5px;
+    }
+
+    .markdown-body pre {
+      background: #090d16;
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      padding: 8px 10px;
+      overflow-x: auto;
+      margin-top: 6px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 11.5px;
+      color: #a5b4fc;
+    }
+
+    /* Feedback Bar */
+    .feedback-bar {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+
+    .feedback-bar button {
+      flex: 1;
+      min-width: 85px;
+      text-align: center;
+    }
+
+    /* Live Feed Debug Drawer */
+    .drawer {
+      background: #080b12;
+      border-top: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      max-height: 220px;
+    }
+
+    .drawer-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 8px 14px;
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--text-muted);
+      cursor: pointer;
+      background: rgba(17, 24, 39, 0.7);
+    }
+
+    .feed-list {
+      overflow-y: auto;
+      padding: 6px 12px 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 11px;
+    }
+
+    .feed-item {
+      display: flex;
+      align-items: baseline;
+      gap: 7px;
+      padding: 4px 6px;
+      border-radius: 5px;
+      background: rgba(30, 41, 59, 0.45);
+      border-left: 2px solid #64748b;
+    }
+
+    .feed-item.src-face { border-left-color: #ec4899; }
+    .feed-item.src-editor { border-left-color: #3b82f6; }
+    .feed-item.src-terminal { border-left-color: #f59e0b; }
+    .feed-item.src-hotkey { border-left-color: #10b981; }
+    .feed-item.src-brain { border-left-color: #a855f7; }
+
+    .feed-time {
+      color: #64748b;
+      font-size: 10px;
+      flex-shrink: 0;
+    }
+
+    .feed-tag {
+      font-weight: 700;
+      font-size: 10px;
+      text-transform: uppercase;
+      flex-shrink: 0;
+    }
+
+    .feed-text {
+      color: #cbd5e1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+  </style>
+</head>
+<body>
+  <!-- Top Bar -->
+  <div class="titlebar">
+    <div class="brand">
+      <div id="wsDot" class="ws-dot" title="Connected to ws://localhost:3000/ws"></div>
+      <span>WHACK HUD</span>
+    </div>
+    <div class="titlebar-actions">
+      <button id="btnSim" class="btn-sim" title="Simulate Face + Editor + Terminal traffic">▶️ Simulate</button>
+      <button id="btnDiagnose" class="btn-primary" title="Trigger Brain Diagnosis (Ctrl+Shift+K)">⚡ Diagnose</button>
+      <button id="btnClose" title="Minimize to Floating Chip">✕</button>
+    </div>
+  </div>
+
+  <!-- Main Content -->
+  <div class="content">
+    <!-- Live Confusion Score Gauge -->
+    <div class="gauge-card">
+      <div class="gauge-header">
+        <span id="gaugeStateText" class="gauge-title">Fusion Status: Calm</span>
+        <span id="gaugeScoreText" class="gauge-value">0.00 / 1.00</span>
+      </div>
+      <div class="gauge-track">
+        <div id="gaugeFill" class="gauge-fill"></div>
+      </div>
+      <div id="reasonsList" class="reasons-list">
+        <span class="reason-pill" style="background: rgba(148,163,184,0.12); border-color: rgba(148,163,184,0.25); color: #94a3b8;">
+          Watching face landmarks + editor/terminal signals...
+        </span>
+      </div>
+    </div>
+
+    <!-- 3-Level Hint Toggle -->
+    <div class="hint-tabs">
+      <button class="hint-tab" data-level="nudge">1 · Subtle Nudge</button>
+      <button class="hint-tab active" data-level="hint">2 · Pointed Hint</button>
+      <button class="hint-tab" data-level="full_explanation">3 · Full Fix</button>
+    </div>
+
+    <!-- AI Brain Diagnosis Card -->
+    <div class="diagnosis-card">
+      <div id="quipBox" class="quip-box">
+        "Press Ctrl+Shift+K (or click ⚡ Diagnose) anytime you're stuck."
+      </div>
+
+      <div class="evidence-row">
+        <span id="filePill" class="file-pill" title="Click to open file & line in VS Code">
+          📄 demo-repo/utils.py:40-45
+        </span>
+        <div class="badge-group">
+          <span id="uncertainBadge" class="uncertain-badge">⚠️ Uncertain</span>
+          <span id="confBadge" class="conf-badge">Ready</span>
+        </div>
+      </div>
+
+      <div id="diagnosisBody" class="markdown-body">Waiting for trigger (`Ctrl+Shift+K`) or auto-nudge from the Fusion Engine...</div>
+    </div>
+
+    <!-- Feedback Controls -->
+    <div class="feedback-bar">
+      <button id="btnNotConfused" title="Dismiss & nudge threshold (3m cooldown)">😌 Not Confused</button>
+      <button id="btnSnooze" title="Snooze nudges for 3 minutes">💤 Snooze 3m</button>
+      <button id="btnCamera" title="Pause/Resume on-device camera scoring">📷 Pause Cam</button>
+      <button id="btnHelpful" title="Mark diagnosis as helpful">👍 Helpful</button>
+    </div>
+  </div>
+
+  <!-- Live Feed Debug Drawer (incident.io Live Feed) -->
+  <div class="drawer">
+    <div id="drawerToggle" class="drawer-header">
+      <span>📡 LIVE SIGNAL & EVENT FEED (ws://localhost:3000/ws)</span>
+      <span id="eventCountLabel">0 events</span>
+    </div>
+    <div id="feedList" class="feed-list"></div>
+  </div>
+
+  <script>
+    const CORE_HTTP = "http://127.0.0.1:3000";
+    const CORE_WS = "ws://127.0.0.1:3000/ws";
+
+    let currentHintLevel = "hint";
+    let currentFile = "demo-repo/utils.py";
+    let currentLine = 42;
+    let streamingBuffer = "";
+
+    const wsDot = document.getElementById("wsDot");
+    const btnSim = document.getElementById("btnSim");
+    const btnDiagnose = document.getElementById("btnDiagnose");
+    const btnClose = document.getElementById("btnClose");
+    const gaugeStateText = document.getElementById("gaugeStateText");
+    const gaugeScoreText = document.getElementById("gaugeScoreText");
+    const gaugeFill = document.getElementById("gaugeFill");
+    const reasonsList = document.getElementById("reasonsList");
+    const quipBox = document.getElementById("quipBox");
+    const filePill = document.getElementById("filePill");
+    const uncertainBadge = document.getElementById("uncertainBadge");
+    const confBadge = document.getElementById("confBadge");
+    const diagnosisBody = document.getElementById("diagnosisBody");
+    const feedList = document.getElementById("feedList");
+    const eventCountLabel = document.getElementById("eventCountLabel");
+
+    function renderSimpleMarkdown(text) {
+      const escaped = text
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
+      return escaped
+        .replace(/```(\w*)\n([\s\S]*?)```/g, "<pre>$2</pre>")
+        .replace(/`([^`]+)`/g, "<code>$1</code>")
+        .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+    }
+
+    function updateGauge(score, faceState, cooldownUntil, cameraPaused, eventCount) {
+      const val = Math.max(0, Math.min(1, Number(score || 0)));
+      gaugeScoreText.textContent = `${val.toFixed(2)} / 1.00`;
+      gaugeFill.style.width = `${Math.round(val * 100)}%`;
+
+      if (typeof eventCount === "number") {
+        eventCountLabel.textContent = `${eventCount} events`;
+      }
+
+      if (cooldownUntil && cooldownUntil > Date.now()) {
+        const secs = Math.ceil((cooldownUntil - Date.now()) / 1000);
+        gaugeStateText.textContent = `Snoozed (${secs}s cooldown)`;
+        gaugeFill.style.background = "#64748b";
+        return;
+      }
+
+      if (faceState === "confused" || val >= 0.7) {
+        gaugeStateText.textContent = "Fusion Status: Stuck / Confused";
+        gaugeFill.style.background = "#ef4444";
+      } else if (val >= 0.4) {
+        gaugeStateText.textContent = "Fusion Status: Deep Focus";
+        gaugeFill.style.background = "#f59e0b";
+      } else {
+        gaugeStateText.textContent = cameraPaused
+          ? "Fusion Status: Calm (Cam Paused)"
+          : "Fusion Status: Calm";
+        gaugeFill.style.background = "#10b981";
+      }
+    }
+
+    function renderReasons(reasons) {
+      if (!Array.isArray(reasons) || reasons.length === 0) return;
+      reasonsList.innerHTML = "";
+      reasons.forEach((r) => {
+        const pill = document.createElement("span");
+        pill.className = "reason-pill";
+        pill.textContent = `⚡ ${r}`;
+        reasonsList.appendChild(pill);
+      });
+    }
+
+    function appendFeedEvent(event) {
+      const row = document.createElement("div");
+      row.className = `feed-item src-${event.source || "editor"}`;
+
+      const time = new Date(event.timestamp || Date.now()).toLocaleTimeString([], {
+        hour12: false,
+      });
+      const p = event.payload || {};
+      let detail = event.type || "";
+
+      if (event.source === "face") {
+        detail = `state=${p.state || "calm"} score=${Number(p.score ?? 0).toFixed(2)}`;
+      } else if (event.source === "editor") {
+        detail = `${p.activeFile || "file"} | diag=${p.diagnosticsCount ?? 0} ${
+          p.isUndo ? "[UNDO]" : ""
+        }`;
+      } else if (event.source === "terminal") {
+        detail = `$ ${p.command || "cmd"} -> exit ${p.exitCode ?? 0} (${p.durationMs ?? 0}ms)`;
+      } else if (event.source === "hotkey") {
+        detail = `Manual hotkey (${p.shortcut || "Ctrl+Shift+K"})`;
+      } else if (event.source === "brain") {
+        detail = `${p.file || "diagnosis"}: ${p.summary || "complete"}`;
+      }
+
+      row.innerHTML = `
+        <span class="feed-time">${time}</span>
+        <span class="feed-tag">[${event.source}]</span>
+        <span class="feed-text">${detail}</span>
+      `;
+
+      feedList.prepend(row);
+      while (feedList.children.length > 40) {
+        feedList.removeChild(feedList.lastChild);
+      }
+    }
+
+    async function requestDiagnosis(hintLevel) {
+      currentHintLevel = hintLevel || currentHintLevel;
+      streamingBuffer = "";
+      diagnosisBody.textContent = "🧠 Inspecting context & streaming diagnosis...";
+      confBadge.textContent = "Streaming...";
+
+      try {
+        await fetch(`${CORE_HTTP}/diagnose`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            triggerType: "hotkey",
+            hintLevel: currentHintLevel,
+          }),
+        });
+      } catch (err) {
+        diagnosisBody.textContent = "Failed to contact Core Server on localhost:3000.";
+      }
+    }
+
+    async function sendFeedback(action) {
+      try {
+        await fetch(`${CORE_HTTP}/feedback`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action }),
+        });
+      } catch (err) {
+        console.error("Feedback error:", err);
+      }
+    }
+
+    // Wire up Hint Level Tabs
+    document.querySelectorAll(".hint-tab").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        document.querySelectorAll(".hint-tab").forEach((b) => b.classList.remove("active"));
+        btn.classList.add("active");
+        const level = btn.getAttribute("data-level") || "hint";
+        requestDiagnosis(level);
+      });
+    });
+
+    // Wire up Top Bar & Feedback Buttons
+    btnDiagnose.addEventListener("click", () => requestDiagnosis(currentHintLevel));
+    btnClose.addEventListener("click", () => {
+      if (window.whackElectron) window.whackElectron.hidePanel();
+    });
+    btnSim.addEventListener("click", async () => {
+      if (window.whackElectron) {
+        const running = await window.whackElectron.toggleSimulator();
+        btnSim.classList.toggle("active", running);
+        btnSim.textContent = running ? "⏹ Stop Sim" : "▶️ Simulate";
+      }
+    });
+
+    filePill.addEventListener("click", () => {
+      if (window.whackElectron && currentFile) {
+        window.whackElectron.openInVsCode(currentFile, currentLine);
+      }
+    });
+
+    document.getElementById("btnNotConfused").addEventListener("click", () => {
+      sendFeedback("not_confused");
+      quipBox.textContent = "Got it — snoozed nudges for 3m and nudged your focus threshold.";
+    });
+    document.getElementById("btnSnooze").addEventListener("click", () => sendFeedback("snooze"));
+    document.getElementById("btnCamera").addEventListener("click", () => sendFeedback("toggle_camera"));
+    document.getElementById("btnHelpful").addEventListener("click", () => {
+      sendFeedback("helpful");
+      confBadge.textContent = "Thanks! 👍";
+    });
+
+    if (window.whackElectron) {
+      window.whackElectron.onTriggerDiagnose((hintLevel) => {
+        streamingBuffer = "";
+        diagnosisBody.textContent = "🧠 Triggered via Hotkey — streaming diagnosis...";
+      });
+      window.whackElectron.onSimulatorStatus((running) => {
+        btnSim.classList.toggle("active", running);
+        btnSim.textContent = running ? "⏹ Stop Sim" : "▶️ Simulate";
+      });
+    }
+
+    // Connect WebSocket for live events & streaming diagnosis
+    function connectWs() {
+      const ws = new WebSocket(CORE_WS);
+
+      ws.onopen = () => {
+        wsDot.classList.remove("disconnected");
+      };
+
+      ws.onmessage = (ev) => {
+        try {
+          const msg = JSON.parse(ev.data);
+
+          if (msg.type === "status") {
+            updateGauge(
+              msg.confusionScore,
+              msg.faceState,
+              msg.cooldownUntil,
+              msg.cameraPaused,
+              msg.eventCount
+            );
+          } else if (msg.type === "event_ingest") {
+            appendFeedEvent(msg.event);
+          } else if (msg.type === "nudge") {
+            renderReasons(msg.reasons);
+            requestDiagnosis(currentHintLevel);
+          } else if (msg.type === "diagnosis_chunk") {
+            streamingBuffer += msg.chunk;
+            diagnosisBody.innerHTML = renderSimpleMarkdown(streamingBuffer);
+          } else if (msg.type === "diagnosis_done") {
+            const d = msg.diagnosis;
+            streamingBuffer = d.summary || streamingBuffer;
+            diagnosisBody.innerHTML = renderSimpleMarkdown(streamingBuffer);
+            quipBox.textContent = `"${d.quip || "Let's squash this bug."}"`;
+
+            if (d.file) {
+              currentFile = d.file;
+              currentLine = Array.isArray(d.lines) ? d.lines[0] : 1;
+              const rangeStr = Array.isArray(d.lines) ? `:${d.lines[0]}-${d.lines[1]}` : "";
+              filePill.textContent = `📄 ${d.file}${rangeStr}`;
+            }
+
+            if (Array.isArray(d.reasons) && d.reasons.length > 0) {
+              renderReasons(d.reasons);
+            }
+
+            uncertainBadge.style.display = d.uncertain ? "inline-block" : "none";
+            const confPct = Math.round((d.confidence ?? 0.95) * 100);
+            confBadge.textContent = `${confPct}% confidence`;
+          }
+        } catch (err) {
+          console.error("WS message error:", err);
+        }
+      };
+
+      ws.onclose = () => {
+        wsDot.classList.add("disconnected");
+        setTimeout(connectWs, 1500);
+      };
+    }
+
+    // Load initial event history on open
+    fetch(`${CORE_HTTP}/events`)
+      .then((r) => r.json())
+      .then((data) => {
+        if (Array.isArray(data.events)) {
+          data.events.slice(-20).forEach((e) => appendFeedEvent(e));
+        }
+      })
+      .catch(() => undefined);
+
+    connectWs();
+  </script>
+</body>
+</html>

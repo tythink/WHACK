@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>WHACK Floating Chip</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      user-select: none;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+    }
+
+    html, body {
+      width: 100%;
+      height: 100%;
+      background: transparent;
+      overflow: hidden;
+    }
+
+    .chip {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      height: 48px;
+      margin: 3px 4px;
+      padding: 0 12px;
+      border-radius: 999px;
+      background: rgba(15, 23, 42, 0.94);
+      border: 1px solid rgba(148, 163, 184, 0.22);
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+      color: #f8fafc;
+      -webkit-app-region: drag;
+      transition: border-color 0.25s ease, box-shadow 0.25s ease;
+    }
+
+    .chip.state-confused {
+      border-color: rgba(239, 68, 68, 0.75);
+      box-shadow: 0 0 20px rgba(239, 68, 68, 0.35);
+    }
+
+    .status-group {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+    }
+
+    .orb {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: #10b981;
+      box-shadow: 0 0 10px #10b981;
+      flex-shrink: 0;
+      transition: background 0.25s ease, box-shadow 0.25s ease;
+    }
+
+    .orb.focusing {
+      background: #f59e0b;
+      box-shadow: 0 0 10px #f59e0b;
+    }
+
+    .orb.confused {
+      background: #ef4444;
+      box-shadow: 0 0 12px #ef4444;
+      animation: pulse 1.2s infinite ease-in-out;
+    }
+
+    .orb.cooldown {
+      background: #64748b;
+      box-shadow: none;
+    }
+
+    @keyframes pulse {
+      0%, 100% { transform: scale(1); opacity: 1; }
+      50% { transform: scale(1.3); opacity: 0.75; }
+    }
+
+    .meta {
+      display: flex;
+      flex-direction: column;
+      line-height: 1.15;
+    }
+
+    .state-label {
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: 0.01em;
+      color: #f1f5f9;
+    }
+
+    .score-label {
+      font-size: 10px;
+      color: #94a3b8;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .actions {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      -webkit-app-region: no-drag;
+    }
+
+    button {
+      border: none;
+      outline: none;
+      cursor: pointer;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 600;
+      padding: 5px 10px;
+      transition: all 0.15s ease;
+    }
+
+    .btn-stuck {
+      background: linear-gradient(135deg, #6366f1, #4f46e5);
+      color: #ffffff;
+    }
+
+    .btn-stuck:hover {
+      background: linear-gradient(135deg, #818cf8, #6366f1);
+      transform: translateY(-1px);
+    }
+
+    .btn-hud {
+      background: rgba(51, 65, 85, 0.75);
+      color: #e2e8f0;
+      border: 1px solid rgba(148, 163, 184, 0.2);
+    }
+
+    .btn-hud:hover {
+      background: rgba(71, 85, 105, 0.9);
+    }
+  </style>
+</head>
+<body>
+  <div id="chipContainer" class="chip">
+    <div class="status-group">
+      <div id="statusOrb" class="orb"></div>
+      <div class="meta">
+        <span id="stateLabel" class="state-label">WHACK · Calm</span>
+        <span id="scoreLabel" class="score-label">Score: 0.00</span>
+      </div>
+    </div>
+    <div class="actions">
+      <button id="btnStuck" class="btn-stuck" title="Trigger AI Diagnosis (Ctrl+Shift+K)">⚡ Stuck</button>
+      <button id="btnHud" class="btn-hud" title="Open Live HUD Panel">HUD</button>
+    </div>
+  </div>
+
+  <script>
+    const chipContainer = document.getElementById("chipContainer");
+    const statusOrb = document.getElementById("statusOrb");
+    const stateLabel = document.getElementById("stateLabel");
+    const scoreLabel = document.getElementById("scoreLabel");
+    const btnStuck = document.getElementById("btnStuck");
+    const btnHud = document.getElementById("btnHud");
+
+    btnStuck.addEventListener("click", () => {
+      if (window.whackElectron) {
+        window.whackElectron.triggerDiagnose("hint");
+      }
+    });
+
+    btnHud.addEventListener("click", () => {
+      if (window.whackElectron) {
+        window.whackElectron.togglePanel();
+      }
+    });
+
+    function updateUiState(score, faceState, cooldownUntil, cameraPaused) {
+      const pct = Number(score || 0).toFixed(2);
+      scoreLabel.textContent = cameraPaused
+        ? `Cam Paused · ${pct}`
+        : `Score: ${pct}`;
+
+      statusOrb.className = "orb";
+      chipContainer.classList.remove("state-confused");
+
+      if (cooldownUntil && cooldownUntil > Date.now()) {
+        statusOrb.classList.add("cooldown");
+        stateLabel.textContent = "Snoozed";
+        return;
+      }
+
+      if (faceState === "confused" || score >= 0.7) {
+        statusOrb.classList.add("confused");
+        chipContainer.classList.add("state-confused");
+        stateLabel.textContent = "Stuck? (Ctrl+⇧+K)";
+      } else if (score >= 0.4) {
+        statusOrb.classList.add("focusing");
+        stateLabel.textContent = "WHACK · Focusing";
+      } else {
+        stateLabel.textContent = "WHACK · Calm";
+      }
+    }
+
+    function connectWs() {
+      const ws = new WebSocket("ws://127.0.0.1:3000/ws");
+
+      ws.onmessage = (event) => {
+        try {
+          const msg = JSON.parse(event.data);
+          if (msg.type === "status") {
+            updateUiState(
+              msg.confusionScore,
+              msg.faceState,
+              msg.cooldownUntil,
+              msg.cameraPaused
+            );
+          } else if (msg.type === "nudge") {
+            updateUiState(msg.score || 0.85, "confused", null, false);
+            if (window.whackElectron) {
+              window.whackElectron.showPanel();
+            }
+          }
+        } catch (err) {
+          console.error("Failed to parse WS message:", err);
+        }
+      };
+
+      ws.onclose = () => {
+        setTimeout(connectWs, 1500);
+      };
+    }
+
+    connectWs();
+  </script>
+</body>
+</html>
