@@ -1,0 +1,26 @@
+{
+  "name": "whack-core",
+  "version": "0.1.0",
+  "private": true,
+  "description": "WHACK Role 4 — Core Ingestion Server, Contracts & Electron HUD",
+  "main": "dist/client/electron/main.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "tsc && node dist/services/core_server/server.js",
+    "dev:server": "tsc && node dist/services/core_server/server.js",
+    "dev:electron": "tsc && electron .",
+    "simulate": "tsc && node dist/services/core_server/simulate.js",
+    "verify:server": "tsc && node dist/services/core_server/verify.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/ws": "^8.5.12",
+    "electron": "^31.2.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.5.4"
+  }
+}
