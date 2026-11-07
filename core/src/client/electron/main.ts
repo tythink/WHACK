@@ -11,6 +11,7 @@ import {
   Tray,
 } from "electron";
 import fs from "fs";
+import os from "os";
 import path from "path";
 import { createCoreServer } from "../../services/core_server/server";
 
@@ -282,36 +283,36 @@ const DEMO_SEQUENCE = [
     source: "editor",
     type: "file_edit",
     payload: {
-      activeFile: "demo-repo/utils.py",
+      activeFile: "utils.py",
       isUndo: false,
       isRedo: false,
       diagnosticsCount: 1,
       cursorDwellMs: 1400,
-      topDiagnostics: ["Line 42: IndexError risk in range(len(items) + 1)"],
-      cursorLine: 42,
+      topDiagnostics: ["Line 11: Off-by-one in range(0, total_items - window_size + 2)"],
+      cursorLine: 11,
     },
   },
   {
     source: "terminal",
     type: "command_exit",
     payload: {
-      command: "pytest tests/test_utils.py",
+      command: "pytest tests/",
       exitCode: 1,
       durationMs: 710,
-      errorHash: "idx_err_utils_42",
-      tailOutput: "E   IndexError: list index out of range at utils.py:42",
+      errorHash: "idx_err_offset_end_6",
+      tailOutput: "IndexError: Offset end 6 exceeds data length 5",
     },
   },
   {
     source: "editor",
     type: "undo_burst",
     payload: {
-      activeFile: "demo-repo/utils.py",
+      activeFile: "utils.py",
       isUndo: true,
       isRedo: false,
       diagnosticsCount: 2,
       cursorDwellMs: 5200,
-      cursorLine: 42,
+      cursorLine: 18,
     },
   },
   {
@@ -323,7 +324,7 @@ const DEMO_SEQUENCE = [
       confidence: 0.92,
       severity: "normal",
       reasons: [
-        "pytest failed 3x with same IndexError",
+        "pytest failed 3x: Offset end 6 exceeds data length 5",
         "sustained brow furrow (0.87)",
         "3 rapid undos in utils.py",
       ],
@@ -375,9 +376,24 @@ function registerIpcAndShortcuts(): void {
   ipcMain.handle(
     "whack:open-vscode",
     async (_e, filePath: string, line?: number) => {
-      const absPath = path.isAbsolute(filePath)
-        ? filePath
-        : path.resolve(process.cwd(), "..", filePath);
+      let absPath = filePath;
+      if (!path.isAbsolute(filePath)) {
+        const candidates = [
+          process.env.WHACK_DEMO_REPO
+            ? path.resolve(process.env.WHACK_DEMO_REPO, filePath)
+            : "",
+          process.env.DEMO_REPO_DIR
+            ? path.resolve(process.env.DEMO_REPO_DIR, filePath)
+            : "",
+          path.resolve(os.homedir(), "whack-demo-repo", filePath),
+          path.resolve(process.cwd(), "..", "demo-repo", filePath),
+          path.resolve(process.cwd(), "..", filePath),
+        ].filter(Boolean);
+
+        absPath =
+          candidates.find((candidate) => fs.existsSync(candidate)) ||
+          candidates[candidates.length - 1];
+      }
       const targetUri = `vscode://file/${absPath.replace(/\\/g, "/")}${
         line ? `:${line}` : ""
       }`;
