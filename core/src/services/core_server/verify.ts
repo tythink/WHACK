@@ -160,7 +160,17 @@ async function runVerification() {
       }),
     });
     assert.strictEqual(brainEventRes.status, 200);
-    console.log("✓ [6/7] Role 3 Brain broadcast_to_core event ingested & pushed to HUD");
+    const brainEventJson = (await brainEventRes.json()) as {
+      fusion: { attemptLog: string; reasons: string[] };
+    };
+    assert(
+      brainEventJson.fusion &&
+        brainEventJson.fusion.attemptLog.includes("Last 10 minutes:"),
+      "Expected FusionEngine to generate Attempt-Log summary"
+    );
+    console.log(
+      "✓ [6/7] Role 3 Brain broadcast_to_core & Fusion Attempt-Log verified"
+    );
 
     // 7. Test 100-Event Ring Buffer Cap
     for (let i = 0; i < 105; i++) {

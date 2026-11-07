@@ -7,6 +7,7 @@ import {
   normalizeIncomingEvent,
 } from "../../contracts";
 import { runDiagnosis } from "./brainBridge";
+import { FusionEngine } from "./fusionEngine";
 import { EventRingBuffer } from "./ringBuffer";
 import { WsHub } from "./wsHub";
 
@@ -46,6 +47,7 @@ function sendJson(
 
 export function createCoreServer(capacity = 100) {
   const store = new EventRingBuffer(capacity);
+  const fusion = new FusionEngine();
   let wsHub: WsHub;
 
   const server = http.createServer(
@@ -152,18 +154,34 @@ export function createCoreServer(capacity = 100) {
           });
         }
 
-        // Check if this event is an explicit nudge or high-confusion trigger (when not in cooldown)
+        // Check if this event is an explicit nudge or triggers the multi-signal Fusion Engine
+        const snap = store.getSnapshot();
+        const fusionDecision = fusion.evaluate(store.getAll(), {
+          inCooldown: store.isInCooldown(),
+          cameraPaused: snap.cameraPaused,
+        });
+
         if (!store.isInCooldown()) {
-          if (event.type === "nudge" || Array.isArray(payloadObj.reasons)) {
+          if (
+            event.type === "nudge" ||
+            Array.isArray(payloadObj.reasons) ||
+            fusionDecision.shouldNudge
+          ) {
             const reasons = Array.isArray(payloadObj.reasons)
               ? (payloadObj.reasons as string[])
+              : fusionDecision.reasons.length > 0
+              ? fusionDecision.reasons
               : ["confusion threshold exceeded"];
+            const severity =
+              payloadObj.severity === "soft"
+                ? "soft"
+                : fusionDecision.severity;
             wsHub.broadcast({
               type: "nudge",
               timestamp: Date.now(),
-              severity: payloadObj.severity === "soft" ? "soft" : "normal",
+              severity,
               reasons,
-              score: store.getSnapshot().confusionScore,
+              score: Math.max(snap.confusionScore, fusionDecision.combinedScore),
             });
           }
         }
@@ -171,7 +189,8 @@ export function createCoreServer(capacity = 100) {
         sendJson(res, 200, {
           ok: true,
           ingested: event,
-          eventCount: store.getSnapshot().eventCount,
+          eventCount: snap.eventCount,
+          fusion: fusionDecision,
         });
         return;
       }
@@ -187,6 +206,11 @@ export function createCoreServer(capacity = 100) {
         }
 
         const snap = store.getSnapshot();
+        const fusionDecision = fusion.evaluate(store.getAll(), {
+          inCooldown: store.isInCooldown(),
+          cameraPaused: snap.cameraPaused,
+        });
+
         const hintLevel: HintLevel =
           body.hintLevel === "nudge" ||
           body.hintLevel === "hint" ||
@@ -200,9 +224,11 @@ export function createCoreServer(capacity = 100) {
           hintLevel,
           fusionReasons: Array.isArray(body.fusionReasons)
             ? (body.fusionReasons as string[])
-            : undefined,
+            : fusionDecision.reasons,
           attemptLog:
-            typeof body.attemptLog === "string" ? body.attemptLog : undefined,
+            typeof body.attemptLog === "string"
+              ? body.attemptLog
+              : fusionDecision.attemptLog,
           lastKnownGoodDiff:
             typeof body.lastKnownGoodDiff === "string"
               ? body.lastKnownGoodDiff
