@@ -25,6 +25,7 @@ from brain.models import (
     CodeCitation,
     HintLevelType,
     ExecutionTrace,
+    StructuredEdit,
 )
 from brain.tools import execute_tool, TOOL_DEFINITIONS, git_diff
 from brain.screenshot import (
@@ -36,6 +37,56 @@ from brain.screenshot import (
 from brain.persona import get_random_quip
 from brain.context import assemble_ordered_context, SYSTEM_INSTRUCTIONS
 from brain.citation_verifier import verify_citations
+
+def validate_structured_edit(
+    fix_data: Any,
+    repo_dir: Path,
+) -> Tuple[Optional[StructuredEdit], str]:
+    """Validate that structured edit oldText matches live file lines in target repo exactly."""
+    if not fix_data:
+        return None, "No structured edit provided"
+
+    try:
+        if isinstance(fix_data, dict):
+            fix = StructuredEdit(**fix_data)
+        elif isinstance(fix_data, StructuredEdit):
+            fix = fix_data
+        else:
+            return None, f"Unsupported fix object type: {type(fix_data)}"
+    except Exception as e:
+        return None, f"Invalid structured fix format: {e}"
+
+    from brain.tools import _resolve_safe_path
+    try:
+        target_path = _resolve_safe_path(fix.file)
+    except Exception as e:
+        return None, f"Omitted structured edit: {e}"
+
+    if not target_path.exists() or not target_path.is_file():
+        return None, f"Omitted structured edit: target file '{fix.file}' does not exist on disk"
+
+    try:
+        with open(target_path, "r", encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()
+    except Exception as e:
+        return None, f"Omitted structured edit: failed to read '{fix.file}': {e}"
+
+    total_lines = len(lines)
+    start = fix.startLine
+    end = fix.endLine
+    if start < 1 or end < start or start > max(1, total_lines):
+        return None, f"Omitted structured edit: line range {start}-{end} out of bounds (file has {total_lines} lines)"
+
+    actual_slice = "".join(lines[start - 1 : end]).rstrip("\r\n")
+    expected_old = fix.oldText.rstrip("\r\n")
+
+    if actual_slice != expected_old:
+        return None, (
+            f"Omitted structured edit: oldText did not match live file '{fix.file}' at lines {start}-{end}. "
+            f"Expected: {repr(expected_old)[:80]} vs Live: {repr(actual_slice)[:80]}"
+        )
+
+    return fix, f"Validated: oldText matches live file '{fix.file}' lines {start}-{end}"
 
 class DiagnosticEngine:
     def __init__(self):
@@ -58,13 +109,16 @@ class DiagnosticEngine:
             hint_level = "full_explanation"
 
         # Screenshot handling (strictly opt-in via enable_screenshot or explicit req.screenshot)
+        t_img_0 = time.time()
         screenshot_data = None
         if req.screenshot:
             screenshot_data = parse_incoming_screenshot(req.screenshot)
         elif enable_screenshot:
             screenshot_data = capture_system_screenshot()
+        time_image = round(time.time() - t_img_0, 3)
 
         # Spatial coordinate normalization to Gemini's 0-1000 [y, x] scale relative to actual image
+        t_ctx_0 = time.time()
         img_w = screenshot_data.get("width") if screenshot_data else None
         img_h = screenshot_data.get("height") if screenshot_data else None
         normalized_points = normalize_request_spatial_points(req, actual_width=img_w, actual_height=img_h)
@@ -76,11 +130,14 @@ class DiagnosticEngine:
             use_wiki=use_wiki,
             normalized_spatial_points=normalized_points,
         )
+        time_context = round(time.time() - t_ctx_0, 3)
 
         trace = ExecutionTrace(
             tools_called=[],
             steps_used=0,
             part_sizes=part_sizes,
+            time_image=time_image,
+            time_context=time_context,
             provider=LLM_PROVIDER,
             model_name=LLM_MODEL or ("gemini-3.5-flash-lite" if LLM_PROVIDER in ("gemini", "google") else "gpt-4o-mini"),
             used_fallback=False,
@@ -93,6 +150,19 @@ class DiagnosticEngine:
             gaze_coherence_note=None,
         )
 
+        # Log and record real screenshot payload metadata in execution trace
+        if screenshot_data and screenshot_data.get("base64"):
+            import base64
+            img_bytes = base64.b64decode(screenshot_data["base64"])
+            trace.screenshot_bytes = len(img_bytes)
+            trace.screenshot_mime_type = screenshot_data.get("mime_type", "image/jpeg")
+            trace.screenshot_dimensions = (screenshot_data.get("width"), screenshot_data.get("height"))
+            print(
+                f"[Brain] 📸 Multimodal payload: Sending real image to {trace.provider}: "
+                f"{len(img_bytes):,} bytes ({trace.screenshot_dimensions[0]}x{trace.screenshot_dimensions[1]} px, "
+                f"MIME: {trace.screenshot_mime_type})"
+            )
+
         active_key = get_active_api_key(LLM_PROVIDER)
         diagnosis: Optional[DiagnosisResponse] = None
 
@@ -100,7 +170,7 @@ class DiagnosticEngine:
         if active_key:
             try:
                 t0 = time.time()
-                diagnosis, tool_calls_log, steps, token_usage = await asyncio.wait_for(
+                diagnosis, tool_calls_log, steps, token_usage, timing_breakdown = await asyncio.wait_for(
                     self._run_tool_loop(
                         context_text,
                         req,
@@ -117,6 +187,8 @@ class DiagnosticEngine:
                 trace.tools_called = tool_calls_log
                 trace.steps_used = steps
                 trace.time_to_first_output = time_to_first_output
+                trace.time_network = timing_breakdown.get("time_network", 0.0)
+                trace.time_parsing = timing_breakdown.get("time_parsing", 0.0)
                 trace.real_model_calls = 1
                 trace.token_usage = token_usage
                 diagnosis.source = "model"
@@ -157,6 +229,14 @@ class DiagnosticEngine:
         diagnosis, citation_flags, any_diff_overlap = verify_citations(diagnosis, DEMO_REPO_DIR)
         trace.citation_flags = citation_flags
         trace.diff_overlap = any_diff_overlap
+
+        # 4b. Validate Structured Edit against live repository files
+        if diagnosis.suggestedFix:
+            valid_fix, note = validate_structured_edit(diagnosis.suggestedFix, DEMO_REPO_DIR)
+            diagnosis.suggestedFix = valid_fix
+            trace.structured_edit_validation = note
+        else:
+            trace.structured_edit_validation = "No structured fix suggested"
 
         # 5. Evaluate spatial coherence (gaze vs cursor/caret)
         if normalized_points:
@@ -239,7 +319,14 @@ class DiagnosticEngine:
                 "Please analyze the failure, inspect the diff and codebase, and return your diagnosis as JSON matching the DiagnosisResponse schema with keys: "
                 "summary (str), file (str or null), lines ([start, end] or null), quip (str), uncertain (bool), "
                 "confidence (float between 0 and 1), hintLevel (str), explanation (str or null), "
-                "citations (list of objects with file, lines, snippet, note)."
+                "citations (list of objects with file, lines, snippet, note), "
+                "suggestedFix (object or null with keys file: str, startLine: int, endLine: int, oldText: str, newText: str).\n\n"
+                "STRICT CITATION RULES (MANDATORY):\n"
+                "1. In `lines` and in each citation item, cite ONLY the SPECIFIC, NARROW line(s) (1-3 lines max) directly responsible for the bug that changed in Section (2) GIT DIFF.\n"
+                "2. FORBIDDEN: Citing broad ranges or whole files (e.g. citing lines [1, 15] or [1, 50] is strictly forbidden).\n"
+                "3. Your cited lines MUST overlap with the lines modified in Section (2) GIT DIFF.\n"
+                "4. If you cannot pinpoint the exact 1-3 lines overlapping the diff, you MUST set `uncertain: true`.\n"
+                "5. For `suggestedFix`, `oldText` must match the file on disk exactly line-for-line. If not completely certain, set suggestedFix to null."
             )
 
             if normalized_points:
@@ -270,6 +357,7 @@ class DiagnosticEngine:
             # Note: Do not pass response_schema=DiagnosisResponse as Gemini Developer API rejects additionalProperties
             response = None
             max_retries = 3
+            t_net_0 = time.time()
             for attempt in range(max_retries):
                 try:
                     response = client.models.generate_content(
@@ -291,6 +379,7 @@ class DiagnosticEngine:
                             await asyncio.sleep(2.0 * (attempt + 1))
                             continue
                     raise
+            time_network = round(time.time() - t_net_0, 3)
             steps = 1
             if hasattr(response, "usage_metadata") and response.usage_metadata:
                 p_tok = int(getattr(response.usage_metadata, "prompt_token_count", 0) or 0)
@@ -302,6 +391,7 @@ class DiagnosticEngine:
                     "total_tokens": tot_tok,
                 }
             if response.text:
+                t_parse_0 = time.time()
                 raw_text = response.text.strip()
                 if raw_text.startswith("```"):
                     lines = raw_text.splitlines()
@@ -313,7 +403,9 @@ class DiagnosticEngine:
                 data = json.loads(raw_text)
                 diag = DiagnosisResponse(**data)
                 diag.source = "model"
-                return diag, tools_called, steps, token_usage
+                time_parsing = round(time.time() - t_parse_0, 3)
+                timing = {"time_network": time_network, "time_parsing": time_parsing}
+                return diag, tools_called, steps, token_usage, timing
 
         elif provider == "openai":
             from openai import OpenAI
@@ -322,9 +414,11 @@ class DiagnosticEngine:
                 f"{context_text}\n\n"
                 f"### TARGET HINT LEVEL: {hint_level.upper()}\n"
                 "Please analyze the failure, inspect the diff and codebase, and return your diagnosis as JSON matching the DiagnosisResponse schema with keys: "
-                "summary, file, lines, quip, uncertain, confidence, hintLevel, explanation, citations."
+                "summary, file, lines, quip, uncertain, confidence, hintLevel, explanation, citations, suggestedFix (or null).\n\n"
+                "STRICT CITATION RULES: Cite ONLY the specific 1-3 lines that changed in the diff. Never cite broad ranges like (1, 15)."
             )
 
+            t_net_0 = time.time()
             completion = client.chat.completions.create(
                 model=model_name or "gpt-4o-mini",
                 messages=[
@@ -333,6 +427,7 @@ class DiagnosticEngine:
                 ],
                 response_format={"type": "json_object"},
             )
+            time_network = round(time.time() - t_net_0, 3)
             steps = 1
             if completion.usage:
                 token_usage = {
@@ -342,10 +437,13 @@ class DiagnosticEngine:
                 }
             raw_json = completion.choices[0].message.content
             if raw_json:
+                t_parse_0 = time.time()
                 data = json.loads(raw_json)
                 diag = DiagnosisResponse(**data)
                 diag.source = "model"
-                return diag, tools_called, steps, token_usage
+                time_parsing = round(time.time() - t_parse_0, 3)
+                timing = {"time_network": time_network, "time_parsing": time_parsing}
+                return diag, tools_called, steps, token_usage, timing
 
         raise RuntimeError(f"Unsupported or unconfigured provider: {provider}")
 
@@ -523,6 +621,14 @@ class DiagnosticEngine:
                     "```"
                 )
 
+            suggested_fix = StructuredEdit(
+                file="utils.py",
+                startLine=11,
+                endLine=11,
+                oldText="    for i in range(0, total_items - window_size + 2):",
+                newText="    for i in range(0, total_items - window_size + 1):",
+            )
+
             return DiagnosisResponse(
                 summary=summary,
                 file=file_name,
@@ -532,6 +638,7 @@ class DiagnosticEngine:
                 confidence=0.98,
                 hintLevel=hint_level,
                 explanation=explanation,
+                suggestedFix=suggested_fix,
                 citations=[
                     CodeCitation(
                         file="utils.py",

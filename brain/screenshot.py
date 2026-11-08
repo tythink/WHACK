@@ -229,6 +229,73 @@ def evaluate_spatial_coherence(
             f"Outcome: {outcome}."
         )
 
+def draw_spatial_markers_on_screenshot(
+    image_bytes: bytes,
+    markers: Dict[str, Tuple[Union[int, float], Union[int, float]]],
+    output_path: Optional[Union[str, Any]] = None,
+) -> Tuple[bytes, str]:
+    """Draw high-visibility spatial markers (gaze, cursor, caret) on screenshot image.
+    
+    Returns (annotated_jpeg_bytes, output_file_path).
+    """
+    from PIL import ImageDraw
+    img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    width, height = img.size
+    draw = ImageDraw.Draw(img)
+
+    COLOR_MAP = {
+        "gaze": {"outer": (0, 220, 255), "inner": (0, 100, 255), "text": "GAZE"},
+        "cursor": {"outer": (255, 50, 50), "inner": (255, 230, 0), "text": "CURSOR"},
+        "caret": {"outer": (50, 255, 50), "inner": (255, 255, 255), "text": "CARET"},
+    }
+
+    radius = 24
+    for label, (mx, my) in markers.items():
+        if mx is None or my is None:
+            continue
+        safe_x = max(0, min(width - 1, int(round(mx))))
+        safe_y = max(0, min(height - 1, int(round(my))))
+        cfg = COLOR_MAP.get(label.lower(), {"outer": (255, 255, 0), "inner": (255, 255, 255), "text": label.upper()})
+
+        # Dual outer rings
+        draw.ellipse([(safe_x - radius, safe_y - radius), (safe_x + radius, safe_y + radius)], outline=cfg["outer"], width=3)
+        draw.ellipse([(safe_x - (radius - 4), safe_y - (radius - 4)), (safe_x + (radius - 4), safe_y + (radius - 4))], outline=cfg["inner"], width=2)
+        # Crosshairs
+        draw.line([(safe_x - radius - 15, safe_y), (safe_x + radius + 15, safe_y)], fill=cfg["outer"], width=2)
+        draw.line([(safe_x, safe_y - radius - 15), (safe_x, safe_y + radius + 15)], fill=cfg["outer"], width=2)
+        # Center dot
+        draw.ellipse([(safe_x - 3, safe_y - 3), (safe_x + 3, safe_y + 3)], fill=(255, 255, 255), outline=(0, 0, 0))
+
+        # Label box
+        box_x = safe_x + 35
+        box_y = safe_y - 25
+        if box_x + 160 > width:
+            box_x = safe_x - 175
+        if box_y + 50 > height:
+            box_y = height - 60
+        if box_y < 10:
+            box_y = 10
+
+        label_str = f"[{cfg['text']}] ({safe_x}, {safe_y})"
+        draw.rectangle([(box_x, box_y), (box_x + 165, box_y + 40)], fill=(0, 0, 0, 220), outline=cfg["outer"], width=2)
+        draw.text((box_x + 8, box_y + 10), label_str, fill=(255, 255, 255))
+
+    if output_path is None:
+        from pathlib import Path
+        cache_dir = Path(__file__).resolve().parent / "cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        out_file = cache_dir / "annotated_screenshot.png"
+    else:
+        from pathlib import Path
+        out_file = Path(output_path)
+        out_file.parent.mkdir(parents=True, exist_ok=True)
+
+    img.save(str(out_file), format="PNG")
+
+    out_buf = io.BytesIO()
+    img.save(out_buf, format="JPEG", quality=85)
+    return out_buf.getvalue(), str(out_file.resolve())
+
 def get_real_mouse_position(return_debug: bool = False) -> Union[Tuple[int, int], Tuple[Tuple[int, int], Dict[str, Any]]]:
     """Read real mouse cursor position on Windows (GetCursorPos), macOS (CoreGraphics), or via pyautogui.
     

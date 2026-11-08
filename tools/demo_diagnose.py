@@ -32,7 +32,12 @@ from brain.config import (
 )
 from brain.models import DiagnoseRequest, EditorState, TerminalState
 from brain.agent import DiagnosticEngine
-from brain.screenshot import capture_system_screenshot, process_image_file
+from brain.screenshot import (
+    capture_system_screenshot,
+    process_image_file,
+    draw_spatial_markers_on_screenshot,
+)
+from brain.tools import apply_fix_to_repo, rollback_repo_checkpoint
 from tools.setup_demo_repo import build_repo
 
 def check_key():
@@ -125,30 +130,57 @@ def get_demo_failure(repo_dir: Path) -> str:
         return f"IndexError: Offset end 6 exceeds data length 5 in utils.py ({str(e)})"
 
 async def run_demo(args):
+    import base64
     target_repo = Path(args.repo or DEFAULT_GENERATED_DEMO_REPO).expanduser().resolve()
     ensure_demo_repo(target_repo)
 
-    # 1. Screenshot handling
+    # 1. Parse Dummy Gaze if provided
+    gaze_coords = None
+    if args.dummy_gaze:
+        try:
+            parts = [float(c.strip()) for c in args.dummy_gaze.split(",")]
+            if len(parts) >= 2:
+                gaze_coords = (int(round(parts[0])), int(round(parts[1])))
+                print(f"👁️ [Dummy Gaze] Injected gaze coordinates: X={gaze_coords[0]}, Y={gaze_coords[1]}")
+        except Exception as e:
+            print(f"⚠️ Failed to parse --dummy-gaze '{args.dummy_gaze}': {e}")
+
+    # 2. Screenshot handling
     screenshot_b64 = None
+    raw_shot_bytes = None
+    shot = None
     if args.screenshot:
         print("📸 Capturing screen (--screenshot flag passed)...")
         shot = capture_system_screenshot()
         if shot:
             screenshot_b64 = shot["base64"]
-            print(f"   Captured screenshot ({shot['width']}x{shot['height']}, {shot['size_bytes']} bytes)")
+            raw_shot_bytes = base64.b64decode(shot["base64"])
+            print(f"   Captured screenshot (raw: {shot.get('raw_width', shot['width'])}x{shot.get('raw_height', shot['height'])} -> resized: {shot['width']}x{shot['height']}, {shot['size_bytes']:,} bytes)")
     elif args.screenshot_file:
         file_path = Path(args.screenshot_file).expanduser().resolve()
         if file_path.exists():
             print(f"📸 Loading screenshot file from: {file_path}")
             shot = process_image_file(str(file_path))
             screenshot_b64 = shot["base64"]
+            raw_shot_bytes = base64.b64decode(shot["base64"])
         else:
             print(f"⚠️ Screenshot file not found: {file_path}")
     else:
         # Default: NEVER capture screen
         screenshot_b64 = None
 
-    # 2. Capture terminal failure
+    # If dummy gaze and screenshot are both present, draw visual gaze marker on image
+    annotated_image_path = None
+    if raw_shot_bytes and gaze_coords:
+        markers = {"gaze": gaze_coords}
+        annotated_bytes, out_path = draw_spatial_markers_on_screenshot(
+            raw_shot_bytes,
+            markers=markers,
+        )
+        annotated_image_path = out_path
+        print(f"   🖼️ [Annotated Screenshot] Saved with distinct gaze marker to: {out_path}")
+
+    # 3. Capture terminal failure
     print("⚡ Running test in demo repository to capture terminal state...")
     test_output = get_demo_failure(target_repo)
     print(f"   Captured {len(test_output.splitlines())} lines of test output.\n")
@@ -156,6 +188,7 @@ async def run_demo(args):
     req = DiagnoseRequest(
         hintLevel=args.hint_level,
         screenshot=screenshot_b64,
+        gazePoint=list(gaze_coords) if gaze_coords else None,
         editorState=EditorState(activeFile=args.active_file, cursorLine=args.cursor_line),
         terminalState=TerminalState(
             command="pytest tests/",
@@ -228,6 +261,10 @@ async def run_demo(args):
             print(f"Steps Used:            {trace.steps_used}")
             print(f"Time to First Output:  {trace.time_to_first_output:.3f}s")
             print(f"Total Time:            {trace.total_time:.3f}s")
+            print(f"  • Image Prep/Encode: {trace.time_image:.3f}s")
+            print(f"  • Context Assembly:  {trace.time_context:.3f}s")
+            print(f"  • Network Request:   {trace.time_network:.3f}s")
+            print(f"  • Response Parsing:  {trace.time_parsing:.3f}s")
             print(f"Used Fallback:         {trace.used_fallback}")
             if trace.fallback_reason:
                 print(f"Fallback Reason:       {trace.fallback_reason}")
@@ -235,6 +272,15 @@ async def run_demo(args):
             print(f"Fallback Calls:        {trace.fallback_calls}")
             if trace.token_usage:
                 print(f"Token Usage:           Total: {trace.token_usage.get('total_tokens', 0)} (Prompt: {trace.token_usage.get('prompt_tokens', 0)}, Completion: {trace.token_usage.get('completion_tokens', 0)})")
+            if trace.screenshot_bytes:
+                dims = trace.screenshot_dimensions or ('?', '?')
+                print(f"Screenshot Payload:    {trace.screenshot_bytes:,} bytes (MIME: {trace.screenshot_mime_type}, {dims[0]}x{dims[1]} px)")
+            if trace.spatial_points:
+                print(f"Spatial Attention:     {trace.spatial_points}")
+            if trace.gaze_coherence_note:
+                print(f"Gaze Coherence:        {trace.gaze_coherence_note}")
+            if trace.structured_edit_validation:
+                print(f"Structured Fix Status: {trace.structured_edit_validation}")
             print(f"Diff Overlap:          {'YES (citation overlaps diff)' if trace.diff_overlap else 'NO'}")
             print(f"Tools Called:          {trace.tools_called if trace.tools_called else 'None'}")
             print("\nContext Part Breakdown:")
@@ -247,6 +293,56 @@ async def run_demo(args):
             else:
                 print("  ✓ All cited files and line ranges verified valid in demo-repo.")
             print("=" * 67)
+
+        # Requirement 4 & 6: Structured Edit & Terminal Apply/Rollback Click Simulation
+        if final_diagnosis.suggestedFix:
+            fix = final_diagnosis.suggestedFix
+            print("\n" + "=" * 25 + " 🔧 STRUCTURED FIX " + "=" * 25)
+            print(f"Target File: {fix.file} (lines {fix.startLine}-{fix.endLine})")
+            print("Original Code:")
+            print(f"  {fix.oldText}")
+            print("Suggested Replacement:")
+            print(f"  {fix.newText}")
+            print("=" * 69)
+
+            auto_apply = getattr(args, "auto_apply", False)
+            if not auto_apply:
+                apply_ans = input("\n👉 Apply this fix? [y/n]: ").strip().lower()
+            else:
+                print("\n👉 Apply this fix? [y/n]: y (auto-apply)")
+                apply_ans = "y"
+
+            if apply_ans in ("y", "yes"):
+                print(f"\n🔨 Applying fix to '{fix.file}' in target repo ({target_repo})...")
+                apply_res = apply_fix_to_repo(fix, repo_dir=target_repo)
+                if apply_res.get("success"):
+                    print("✅ Fix applied successfully!")
+                    print(f"   Checkpoint Commit Hash: {apply_res['checkpoint_hash']}")
+                    print(f"   Tests Before Apply:     {'PASSED' if apply_res['before_passed'] else 'FAILED'}")
+                    print(f"   Tests After Apply:      {'PASSED' if apply_res['after_passed'] else 'FAILED'}")
+                    if apply_res.get("after_output"):
+                        summary_line = apply_res["after_output"].splitlines()[-1] if apply_res["after_output"].splitlines() else ""
+                        print(f"   Test Summary:           {summary_line}")
+
+                    auto_rb = getattr(args, "auto_rollback", False)
+                    if not auto_rb:
+                        rb_ans = input("\n👉 Rollback this fix to restore original broken state? [y/n]: ").strip().lower()
+                    else:
+                        print("\n👉 Rollback this fix to restore original broken state? [y/n]: y (auto-rollback)")
+                        rb_ans = "y"
+
+                    if rb_ans in ("y", "yes"):
+                        print(f"\n⏪ Rolling back target repo to checkpoint {apply_res['checkpoint_hash']}...")
+                        rb_res = rollback_repo_checkpoint(apply_res["checkpoint_hash"], repo_dir=target_repo)
+                        if rb_res.get("success"):
+                            print(f"✅ Rollback complete to {rb_res['rolled_back_to']}!")
+                            print(f"   Tests After Rollback: {'PASSED' if rb_res['tests_passed'] else 'FAILED (verified original failure restored)'}")
+                        else:
+                            print(f"❌ Rollback failed: {rb_res.get('error')}")
+                else:
+                    print(f"❌ Failed to apply fix: {apply_res.get('error')}")
+        else:
+            print("\nℹ️ No validated structured fix available for automatic apply.")
     else:
         print("❌ Failed to receive final diagnosis payload.")
 
@@ -258,6 +354,13 @@ def main():
     parser.add_argument("--hint-level", default="hint", choices=["nudge", "hint", "full_explanation", "full"], help="Hint level")
     parser.add_argument("--active-file", default="utils.py", help="Active editor file")
     parser.add_argument("--cursor-line", type=int, default=18, help="Active editor cursor line")
+
+    # Spatial controls (Requirement 2: Dummy Gaze)
+    parser.add_argument("--dummy-gaze", type=str, default=None, help="Inject fixed dummy gaze coordinates 'X,Y' (e.g. '1420,850' or '500,600')")
+
+    # Apply / Rollback click simulation controls (Requirement 6)
+    parser.add_argument("--auto-apply", action="store_true", default=False, help="Automatically answer 'y' to apply prompt")
+    parser.add_argument("--auto-rollback", action="store_true", default=False, help="Automatically answer 'y' to rollback prompt")
 
     # Screenshot controls (Requirement 6b)
     parser.add_argument("--screenshot", action="store_true", default=False, help="Take a real screen capture (strictly opt-in)")
