@@ -286,32 +286,47 @@ class EmotionDetector:
         if talking:
             mouth_tension *= 0.30
 
+        eyes_shut = bool(
+            gaze.eyes_closed
+            and (
+                gaze.closure_duration_sec >= 0.18
+                or gaze.zone == "eyes_closed"
+                or features.get("eye_blink", 0.0) >= 0.60
+            )
+        )
+
         # FACS AU4 (Brow Lowerer) + AU7 (Lid Tightener/Squint) co-activation synergy
-        au4_au7_synergy = 0.14 if (brow_furrow > 0.28 and d_squint > 0.12) else 0.0
+        au4_au7_synergy = (
+            0.14 if (brow_furrow > 0.28 and d_squint > 0.12 and not eyes_shut) else 0.0
+        )
         # Stress blink-rate reinforcement (>28 blinks/min)
         stress_blink_bonus = 0.07 if gaze.blinks_per_min > 28.0 else 0.0
 
         smile_suppress = 1.0 - 0.75 * min(1.0, d_smile * 2.0)
 
         # 1. Confused (Face + Body Noisy-OR: head_scratch, chin_rest, lean_in, head_tilt)
-        face_confused = float(
-            np.clip(
-                (
-                    0.74 * brow_furrow
-                    + 0.46 * min(1.0, d_squint * 2.1)
-                    + 0.14 * min(1.0, d_pucker * 1.6 * mouth_occ_scale)
-                    + au4_au7_synergy
-                    + stress_blink_bonus * 0.5
+        if eyes_shut:
+            face_confused = 0.0
+            raw_confused = 0.0
+        else:
+            face_confused = float(
+                np.clip(
+                    (
+                        0.74 * brow_furrow
+                        + 0.46 * min(1.0, d_squint * 2.1)
+                        + 0.14 * min(1.0, d_pucker * 1.6 * mouth_occ_scale)
+                        + au4_au7_synergy
+                        + stress_blink_bonus * 0.5
+                    )
+                    * (1.0 - 0.55 * mouth_tension)
+                    * smile_suppress,
+                    0.0,
+                    1.0,
                 )
-                * (1.0 - 0.55 * mouth_tension)
-                * smile_suppress,
-                0.0,
-                1.0,
             )
-        )
-        raw_confused = _noisy_or(
-            face_confused, body_res.emotion_boosts.get("confused", 0.0)
-        )
+            raw_confused = _noisy_or(
+                face_confused, body_res.emotion_boosts.get("confused", 0.0)
+            )
 
         # 2. Frustrated (Face + Body Noisy-OR: facepalm_or_rub, head_shake, clenched_fist, hands_thrown_up)
         face_frustrated = float(
@@ -390,11 +405,14 @@ class EmotionDetector:
             self._drowsy_history.popleft()
         rolling_lid = float(np.mean([v for _, v in self._drowsy_history]))
 
-        closure_boost = (
-            min(1.0, 0.35 + (gaze.closure_duration_sec - 0.25) * 1.35)
-            if gaze.closure_duration_sec > 0.25
-            else 0.0
-        )
+        if eyes_shut:
+            closure_boost = min(1.0, 0.65 + max(0.0, gaze.closure_duration_sec - 0.18) * 1.35)
+        else:
+            closure_boost = (
+                min(1.0, 0.35 + (gaze.closure_duration_sec - 0.25) * 1.35)
+                if gaze.closure_duration_sec > 0.25
+                else 0.0
+            )
         d_pitch = gaze.head_pitch - profile.get("head_pitch", 0.0)
         head_droop = min(0.75, _pos(-d_pitch - 5.5) / 12.5)
         yawn_bonus = (
@@ -505,6 +523,10 @@ class EmotionDetector:
             if primary in ("confused", "frustrated") and score >= 0.55:
                 return (f"DEEP THOUGHT — {primary}{cue_tag} while looking away", "muted")
             return ("SUPPRESSED — Looking away from screen", "muted")
+        if gaze.zone == "eyes_closed" or gaze.eyes_closed:
+            if primary == "fatigued" or score >= 0.50:
+                return (f"BREAK RECOMMENDATION — Fatigue{cue_tag} detected", "warn")
+            return (f"RESTING — Eyes closed{cue_tag}", "ok")
         if primary in ("confused", "frustrated") and score >= 0.56:
             if sustained_sec >= 2.5:
                 return (
@@ -545,18 +567,32 @@ def build_event_payload(
             2,
         )
     )
-    contract_state = "confused" if distress_score >= 0.56 else "calm"
+    eyes_shut = gaze.eyes_closed and (
+        gaze.closure_duration_sec >= 0.18 or gaze.zone == "eyes_closed"
+    )
+    if eyes_shut or emotion.primary_emotion == "fatigued":
+        contract_state = "fatigued"
+        payload_score = round(float(emotion.emotions.get("fatigued", 0.85)), 2)
+    elif distress_score >= 0.56:
+        contract_state = "confused"
+        payload_score = distress_score
+    else:
+        contract_state = "calm"
+        payload_score = distress_score
 
     return {
         "source": "face",
         "type": "face_update",
         "timestamp": int(time.time() * 1000),
         "state": contract_state,
-        "score": distress_score,
+        "score": payload_score,
+        "distress_score": distress_score,
         "confidence": emotion.confidence,
         "primary_emotion": emotion.primary_emotion,
         "primary_score": emotion.primary_score,
         "emotions": dict(emotion.emotions),
+        "fusion_status": emotion.fusion_status,
+        "fusion_level": emotion.fusion_level,
         "gaze": {
             "zone": gaze.zone,
             "screen_x_px": gaze.screen_x_px,

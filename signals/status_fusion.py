@@ -17,7 +17,7 @@ import re
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Any, Deque, Dict, List, Optional, Tuple
+from typing import Any, Deque, Dict, List, Optional, Tuple, Union
 
 from input_caret_tracker import SignalSnapshot
 
@@ -35,6 +35,9 @@ ACTIONABLE_STUCK_STATES = (
     "stuck_erase_thrash",
     "stuck_attention_split",
     "frustrated_blocked",
+    "fatigued",
+    "error_confusion",
+    "code_comprehension_confusion",
 )
 
 _SECRET_PATTERNS = (
@@ -120,6 +123,8 @@ class UserStatusResult:
     cooldown_remaining_sec: float
     reasons: List[str] = field(default_factory=list)
     attempt_summary: str = ""
+    confusion_type: Optional[str] = None
+    diagnostics_count: int = 0
 
 
 class MultimodalStatusFusionEngine:
@@ -138,14 +143,22 @@ class MultimodalStatusFusionEngine:
         cooldown_sec: float = 25.0,
         trigger_hold_sec: float = 1.6,
         smoothing_alpha: float = 0.38,
+        screen_height: int = 1080,
+        fatigue_hold_sec: float = 2.5,
+        fatigue_cooldown_sec: float = 180.0,
     ) -> None:
         self.cooldown_sec = float(cooldown_sec)
         self.trigger_hold_sec = float(trigger_hold_sec)
         self.alpha = float(smoothing_alpha)
+        self.screen_height = int(screen_height)
+        self.fatigue_hold_sec = float(fatigue_hold_sec)
+        self.fatigue_cooldown_sec = float(fatigue_cooldown_sec)
 
         self._smoothed_stuck: float = 0.0
         self._stuck_since: Optional[float] = None
         self._last_brain_call_at: float = -1e9
+        self._last_fatigue_call_at: float = -1e9
+        self._last_status: str = "focused_flow"
         self._escalation_count: int = 0
         self._recent_distress: bool = False
 
@@ -165,15 +178,23 @@ class MultimodalStatusFusionEngine:
         # Rolling 10-min terminal & behavioral attempt history
         self._terminal_runs: Deque[TerminalRunRecord] = deque(maxlen=30)
 
+        # Editor diagnostics
+        self._editor_diagnostics_count: int = 0
+        self._editor_diagnostics_summary: str = ""
+
     def reset_cooldown(self) -> None:
         self._last_brain_call_at = -1e9
+        self._last_fatigue_call_at = -1e9
         self._stuck_since = None
 
     def mark_brain_called(self, now: Optional[float] = None) -> None:
         t = time.monotonic() if now is None else now
         self._last_brain_call_at = t
+        if self._last_status == "fatigued":
+            self._last_fatigue_call_at = t
+        else:
+            self._escalation_count = min(3, self._escalation_count + 1)
         self._stuck_since = None
-        self._escalation_count = min(3, self._escalation_count + 1)
 
     @property
     def latest_terminal_dict(self) -> Optional[Dict[str, Any]]:
@@ -187,6 +208,11 @@ class MultimodalStatusFusionEngine:
             "errorHash": r.error_hash if r.exit_code != 0 else None,
             "tailOutput": r.tail_output,
         }
+
+    def record_editor_diagnostics(self, count: int, summary: str = "") -> None:
+        """Record live IDE editor diagnostic count and summary."""
+        self._editor_diagnostics_count = max(0, int(count))
+        self._editor_diagnostics_summary = str(summary or "")
 
     def record_terminal_run(
         self,
@@ -221,12 +247,34 @@ class MultimodalStatusFusionEngine:
         body: Optional[Any] = None,
         face_detected: bool = True,
         now: Optional[float] = None,
+        screen_height: Optional[int] = None,
+        editor_diagnostics: Optional[Union[int, Dict[str, Any]]] = None,
     ) -> UserStatusResult:
         """Fuse OS `SignalSnapshot` with `face/` Gaze, 6-Emotions, and BodyGesture results."""
         t = time.monotonic() if now is None else now
 
+        if editor_diagnostics is not None:
+            if isinstance(editor_diagnostics, int):
+                self.record_editor_diagnostics(editor_diagnostics)
+            elif isinstance(editor_diagnostics, dict):
+                cnt = (
+                    editor_diagnostics.get("count")
+                    or editor_diagnostics.get("diagnosticsCount")
+                    or 0
+                )
+                sm = (
+                    editor_diagnostics.get("summary")
+                    or editor_diagnostics.get("diagnosticsSummary")
+                    or ""
+                )
+                self.record_editor_diagnostics(cnt, sm)
+
         mx, my = int(sig.mouse_x_px), int(sig.mouse_y_px)
         cx, cy = int(sig.caret_x_px), int(sig.caret_y_px)
+
+        gaze_sh = getattr(gaze, "screen_height", None) if gaze is not None else None
+        eff_screen_h = int(screen_height or gaze_sh or self.screen_height or 1080)
+        terminal_split_y = int(0.66 * max(720, eff_screen_h))
 
         # 1. Resolve brief face-occlusion flicker (e.g. hand scratching head / facepalm) vs true absence
         if face_detected:
@@ -278,12 +326,15 @@ class MultimodalStatusFusionEngine:
         if body_gesture in ("head_scratch", "chin_rest", "facepalm_or_rub", "hands_thrown_up", "clenched_fist"):
             facial_distress = min(1.0, max(facial_distress, 0.58) + 0.08)
 
-        # 2. Resolve Gaze Coordinate & Prevent Squint/Brow-Furrow/Chin-Tuck From False-Triggering "AFK"!
+        # 2. Resolve Gaze Coordinate & Prevent Squint/Brow-Furrow/Chin-Tuck/Fatigue-Droop From False-Triggering "AFK"!
         is_actively_confused = (
             facial_distress >= 0.45
             or primary_emotion in ("confused", "frustrated")
+            or fatigued_val >= 0.58
+            or primary_emotion == "fatigued"
         )
-        if gaze is not None and eff_face_present:
+        has_real_gaze = (gaze is not None) and eff_face_present
+        if has_real_gaze:
             gx, gy = int(gaze.screen_x_px), int(gaze.screen_y_px)
             raw_zone = str(getattr(gaze, "zone", "screen_editor"))
             head_yaw = float(getattr(gaze, "head_yaw", 0.0))
@@ -300,7 +351,7 @@ class MultimodalStatusFusionEngine:
             if raw_zone == "looking_away" and (
                 not head_turned_far or (is_actively_confused and abs(head_yaw) < 50.0)
             ):
-                gaze_zone = "screen_terminal" if gy > 700 else "screen_editor"
+                gaze_zone = "screen_terminal" if gy >= terminal_split_y else "screen_editor"
                 self._turned_away_since = None
             elif raw_zone == "looking_away" and head_turned_far and not is_actively_confused:
                 gaze_zone = "looking_away"
@@ -311,20 +362,25 @@ class MultimodalStatusFusionEngine:
                 if gaze_zone != "looking_away":
                     self._turned_away_since = None
         else:
-            gx, gy = cx, cy
-            gaze_zone = "looking_away" if not eff_face_present else "screen_editor"
+            # Never synthesize gaze = caret when gaze is None / face is not tracked!
+            gx, gy = 0, 0
+            gaze_zone = "looking_away" if not eff_face_present else "no_gaze"
 
         turned_away_sec = (
             (t - self._turned_away_since) if self._turned_away_since is not None else 0.0
         )
 
         # 3. Spatial distances among the 3 coordinates
-        dist_gaze_caret = math.hypot(gx - cx, gy - cy)
-        dist_gaze_mouse = math.hypot(gx - mx, gy - my)
+        dist_gaze_caret = math.hypot(gx - cx, gy - cy) if has_real_gaze else 0.0
+        dist_gaze_mouse = math.hypot(gx - mx, gy - my) if has_real_gaze else 0.0
         dist_mouse_caret = math.hypot(mx - cx, my - cy)
 
-        on_screen = eff_face_present and gaze_zone in ("screen_editor", "screen_terminal", "eyes_closed")
-        if eff_face_present and gaze_zone in ("screen_editor", "screen_terminal"):
+        on_screen = has_real_gaze and gaze_zone in (
+            "screen_editor",
+            "screen_terminal",
+            "eyes_closed",
+        )
+        if has_real_gaze and gaze_zone in ("screen_editor", "screen_terminal"):
             self._gaze_hist.append((t, gx, gy))
         while self._gaze_hist and (t - self._gaze_hist[0][0]) > 3.5:
             self._gaze_hist.popleft()
@@ -338,8 +394,17 @@ class MultimodalStatusFusionEngine:
         else:
             gaze_spread_px = 0.0
 
-        gaze_locked_near_caret = (
-            on_screen
+        is_eyes_closed = bool(
+            getattr(gaze, "eyes_closed", False)
+            or gaze_zone == "eyes_closed"
+            or getattr(gaze, "closure_duration_sec", 0.0) >= 0.24
+        )
+
+        gaze_locked_near_caret = bool(
+            not is_eyes_closed
+            and has_real_gaze
+            and face_detected
+            and on_screen
             and sig.caret_detected
             and dist_gaze_caret <= self.CARET_LOCK_RADIUS_PX
             and gaze_spread_px <= 125.0
@@ -377,6 +442,11 @@ class MultimodalStatusFusionEngine:
             and self._terminal_runs[-1].exit_code == 0
             and (t - self._terminal_runs[-1].timestamp) <= 4.0
         )
+
+        has_active_errors = (self._editor_diagnostics_count > 0) or (
+            len(failed_runs) > 0 and not just_passed
+        )
+        confusion_type: Optional[str] = None
 
         kb_idle_s = sig.keyboard_dwell_ms / 1000.0
         caret_idle_s = sig.caret_dwell_ms / 1000.0
@@ -423,12 +493,19 @@ class MultimodalStatusFusionEngine:
         reasons: List[str] = []
         cooldown_rem = max(0.0, self.cooldown_sec - (t - self._last_brain_call_at))
 
-        # True AFK requires EITHER no face in camera for >=3s OR head turned >=45 deg sideways for >=4s (with idle cursors & NO active confusion!)
+        # True AFK requires idle cursors (>=8s) AND either no face in camera (immediately if camera never saw a face,
+        # or >=3s after face left frame) OR head turned >=45 deg sideways for >=4s without active confusion.
+        no_face_afk_ready = (not eff_face_present) and (
+            self._last_face_seen_at is None or face_missing_sec >= self.AFK_NO_FACE_MIN_SEC
+        )
+        os_active_without_camera = (not eff_face_present) and (
+            kb_idle_s < 8.0 or mouse_idle_s < 8.0
+        )
         is_truly_afk = (
             kb_idle_s >= 8.0
             and mouse_idle_s >= 8.0
             and (
-                (not eff_face_present and face_missing_sec >= self.AFK_NO_FACE_MIN_SEC)
+                no_face_afk_ready
                 or (turned_away_sec >= self.AFK_TURNED_AWAY_MIN_SEC and not is_actively_confused)
             )
         )
@@ -443,7 +520,11 @@ class MultimodalStatusFusionEngine:
             status = "afk_away"
             raw_stuck = 0.0
             self._stuck_since = None
-            why = f"no face {face_missing_sec:.0f}s" if not eff_face_present else f"head turned away {turned_away_sec:.0f}s"
+            why = (
+                f"no face {max(face_missing_sec, joint_idle_s):.0f}s"
+                if not eff_face_present
+                else f"head turned away {turned_away_sec:.0f}s"
+            )
             reasons.append(f"cursors idle ({joint_idle_s:.0f}s) + {why} -> AFK (main Brain call disabled)")
 
         elif (just_passed or (delighted_val >= 0.58 and primary_emotion == "delighted")) and (
@@ -459,7 +540,7 @@ class MultimodalStatusFusionEngine:
 
         else:
             is_frustrated_blocked = (
-                on_screen
+                (on_screen or os_active_without_camera)
                 and (
                     (sig.mouse_wiggle_score >= 0.55 and (facial_distress >= 0.38 or sig.mouse_wiggle_score >= 0.75))
                     or max_same_error >= 3
@@ -492,7 +573,21 @@ class MultimodalStatusFusionEngine:
                 and (sig.erase_episodes >= 5 or sig.weighted_erase_score >= 5.2 or sig.undo_redo_flips >= 3)
                 and (sig.trapped_same_line_sec >= 16.0 or sig.caret_line_thrash_score >= 0.62)
             )
-            is_erase_thrash = tier_a_multimodal_thrash or tier_b_pokerface_thrash
+            tier_c_nocam_thrash = (
+                os_active_without_camera
+                and not resumed_smooth_typing
+                and sig.erase_episodes >= 3
+                and same_line_trapped
+                and (
+                    sig.hesitation_erases >= 1
+                    or sig.undo_redo_flips >= 1
+                    or sig.weighted_erase_score >= 3.2
+                    or sig.caret_line_thrash_score >= 0.52
+                )
+            )
+            is_erase_thrash = (
+                tier_a_multimodal_thrash or tier_b_pokerface_thrash or tier_c_nocam_thrash
+            )
 
             is_attention_split = (
                 caret_idle_s >= 7.5
@@ -505,7 +600,8 @@ class MultimodalStatusFusionEngine:
             # - Moderate confusion (>=0.48) + cursors idle (>=7.5s) on screen -> stuck!
             # - Poker-face extreme freeze (>=22s) locked on caret -> stuck!
             is_frozen_at_caret = (
-                on_screen
+                not is_eyes_closed
+                and on_screen
                 and (
                     (facial_distress >= 0.60 and kb_idle_s >= 4.5 and mouse_idle_s >= 3.0)
                     or (facial_distress >= 0.48 and joint_idle_s >= 7.5)
@@ -547,30 +643,64 @@ class MultimodalStatusFusionEngine:
                 if facial_distress >= 0.42:
                     reasons.append(f"paired with {primary_emotion} ({facial_distress:.2f})")
 
-            elif is_frozen_at_caret:
-                status = "stuck_frozen_at_caret"
-                raw_stuck = max(0.75, 0.48 * freeze_sub + 0.52 * max(facial_distress, 0.52))
-                reasons.append(
-                    f"keyboard_cursor idle {kb_idle_s:.1f}s & mouse_cursor idle {mouse_idle_s:.1f}s"
+            elif is_eyes_closed or (
+                eff_face_present
+                and fatigued_val >= 0.60
+                and (
+                    primary_emotion == "fatigued"
+                    or fatigued_val >= facial_distress
+                    or body_gesture in ("eye_rub", "shoulder_slump")
                 )
+            ):
+                status = "fatigued"
+                raw_stuck = max(0.68, fatigued_val, 0.78 if is_eyes_closed else 0.0)
+                gest_note = f", gesture: {body_gesture}" if body_gesture != "none" else ""
+                if is_eyes_closed:
+                    reasons.append("eyes fully closed -> tired/fatigued state (Chef recommends a short break)")
+                else:
+                    reasons.append(
+                        f"sustained tiredness/fatigue ({fatigued_val:.2f}{gest_note}) — Chef recommends a short break"
+                    )
+
+            elif is_frozen_at_caret and not is_eyes_closed:
+                if facial_distress >= 0.45 or primary_emotion in ("confused", "frustrated"):
+                    if has_active_errors:
+                        status = "error_confusion"
+                        confusion_type = "error_confusion"
+                        raw_stuck = max(0.75, 0.48 * freeze_sub + 0.52 * max(facial_distress, 0.52))
+                        reasons.append(
+                            f"confusion paired with active errors ({self._editor_diagnostics_count} diagnostics, "
+                            f"{len(failed_runs)} failed terminal runs) -> error confusion"
+                        )
+                    else:
+                        status = "code_comprehension_confusion"
+                        confusion_type = "code_comprehension_confusion"
+                        raw_stuck = max(0.75, 0.48 * freeze_sub + 0.52 * max(facial_distress, 0.52))
+                        reasons.append(
+                            "confusion with 0 diagnostics & clean terminal -> code comprehension confusion"
+                        )
+                else:
+                    status = "stuck_frozen_at_caret"
+                    raw_stuck = max(0.75, 0.48 * freeze_sub + 0.52 * max(facial_distress, 0.52))
+                    reasons.append(
+                        f"keyboard_cursor idle {kb_idle_s:.1f}s & mouse_cursor idle {mouse_idle_s:.1f}s"
+                    )
                 if gaze_locked_near_caret:
                     reasons.append(f"eye_gaze pinned {dist_gaze_caret:.0f}px from keyboard_cursor |")
                 if facial_distress >= 0.45:
                     tag = f" + {body_gesture}" if body_gesture != "none" else ""
                     reasons.append(f"sustained {primary_emotion} ({facial_distress:.2f}){tag}")
 
-            elif on_screen and facial_distress >= 0.48:
+            elif on_screen and facial_distress >= 0.48 and not is_eyes_closed:
+                confusion_type = (
+                    "error_confusion" if has_active_errors else "code_comprehension_confusion"
+                )
                 status = "confused_thinking"
                 raw_stuck = max(0.46, 0.65 * facial_distress + 0.25 * signal_score)
                 tag = f" + {body_gesture}" if body_gesture != "none" else ""
                 reasons.append(
-                    f"active {primary_emotion} ({facial_distress:.2f}){tag} — confirming dwell ({kb_idle_s:.1f}s)..."
+                    f"active {primary_emotion} ({facial_distress:.2f}){tag} [type={confusion_type}] — confirming dwell ({kb_idle_s:.1f}s)..."
                 )
-
-            elif fatigued_val >= 0.64 and primary_emotion == "fatigued":
-                status = "fatigued"
-                raw_stuck = 0.42
-                reasons.append(f"sustained fatigue ({fatigued_val:.2f}) + slowed activity")
 
             elif kb_idle_s >= 8.0 and mouse_idle_s >= 6.0 and facial_distress < 0.44 and on_screen:
                 status = "calm_reading"
@@ -587,11 +717,13 @@ class MultimodalStatusFusionEngine:
                 else:
                     reasons.append(f"monitoring calmly on {gaze_zone}")
 
+        self._last_status = status
         self._smoothed_stuck = (1.0 - self.alpha) * self._smoothed_stuck + self.alpha * raw_stuck
         stuck_score = round(max(0.0, min(1.0, self._smoothed_stuck)), 2)
 
         if status in ACTIONABLE_STUCK_STATES:
-            self._recent_distress = True
+            if status != "fatigued":
+                self._recent_distress = True
             if self._stuck_since is None:
                 self._stuck_since = t
             sustained_stuck_sec = t - self._stuck_since
@@ -599,12 +731,19 @@ class MultimodalStatusFusionEngine:
             self._stuck_since = None
             sustained_stuck_sec = 0.0
 
+        req_hold_sec = self.fatigue_hold_sec if status == "fatigued" else self.trigger_hold_sec
+        eff_cooldown_rem = (
+            max(cooldown_rem, self.fatigue_cooldown_sec - (t - self._last_fatigue_call_at))
+            if status == "fatigued"
+            else cooldown_rem
+        )
+
         # Hard rule: NEVER call main Brain when AFK (`status == "afk_away"`)
         should_call_brain = (
             status != "afk_away"
             and status in ACTIONABLE_STUCK_STATES
-            and sustained_stuck_sec >= self.trigger_hold_sec
-            and cooldown_rem <= 0.0
+            and sustained_stuck_sec >= req_hold_sec
+            and eff_cooldown_rem <= 0.0
         )
 
         if self._escalation_count == 0:
@@ -624,6 +763,7 @@ class MultimodalStatusFusionEngine:
             status=status,
             gx=gx,
             gy=gy,
+            has_gaze=has_real_gaze,
             six_emotions=six_emotions,
             max_same_error=max_same_error,
             failed_count=len(failed_runs),
@@ -657,6 +797,8 @@ class MultimodalStatusFusionEngine:
             cooldown_remaining_sec=round(cooldown_rem, 1),
             reasons=reasons,
             attempt_summary=attempt_summary,
+            confusion_type=confusion_type,
+            diagnostics_count=self._editor_diagnostics_count,
         )
 
     def _build_attempt_summary(
@@ -665,15 +807,17 @@ class MultimodalStatusFusionEngine:
         status: str,
         gx: int,
         gy: int,
+        has_gaze: bool,
         six_emotions: Dict[str, float],
         max_same_error: int,
         failed_count: int,
     ) -> str:
+        gaze_tag = f"gaze=({gx},{gy})" if has_gaze else "gaze=none"
         parts: List[str] = [
             f"status={status}",
             f"mouse=({sig.mouse_x_px},{sig.mouse_y_px})",
             f"caret|=({sig.caret_x_px},{sig.caret_y_px}) dwell {sig.caret_dwell_ms / 1000.0:.1f}s",
-            f"gaze=({gx},{gy})",
+            gaze_tag,
             f"conf={six_emotions['confused']:.2f}/frust={six_emotions['frustrated']:.2f}",
         ]
         if sig.erase_episodes > 0:

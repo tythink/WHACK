@@ -1,10 +1,9 @@
 """Active Caller & Adapter Interface from Role 1+2 (Face + Signals) -> Role 3 (Brain).
 
-Since Role 3 (`brain/`) is being built in parallel by a teammate, this module isolates
-the exact output contract — **3 Screen Coordinates + 6 Emotions** — behind a clean,
-plug-and-play adapter (`BrainInput` + `call_teammate_brain`) that already works end-to-end
-right now via a built-in Placeholder Brain, live JSON file outbox (`latest_brain_call.json`),
-Python callbacks, and optional HTTP POST (`http://localhost:5002/diagnose`).
+Isolates the multimodal output contract — **3 Screen Coordinates + 6 Emotions + IDE Context** —
+behind a live HTTP & JSON outbox caller (`BrainCaller` / `ActiveBrainCaller`) targeting
+`POST http://127.0.0.1:5002/diagnose` and enriching proactive calls via
+`GET http://127.0.0.1:3000/context`.
 
 Mandatory Outgoing Data on Every Brain Call:
   1. `mouse_cursor`:    `{"x": mouse_x_px, "y": mouse_y_px}`
@@ -18,15 +17,15 @@ Strict AFK Rule: If `status.status == "afk_away"`, the main Brain is NEVER calle
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import inspect
 import json
-import math
+import os
 from pathlib import Path
 import queue
 import threading
 import time
-from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
+from typing import Any, Callable, Deque, Dict, List, Optional, Tuple, Union
 
 import requests
 
@@ -36,10 +35,43 @@ from status_fusion import (
     SIX_EMOTION_KEYS,
     UserStatusResult,
     normalize_six_emotions,
+    redact_secrets,
 )
 
-DEFAULT_BRAIN_URL = "http://localhost:5002/diagnose"
-LATEST_BRAIN_CALL_PATH = Path(__file__).resolve().parent / "latest_brain_call.json"
+DEFAULT_BRAIN_URL = "http://127.0.0.1:5002/diagnose"
+DEFAULT_CORE_CONTEXT_URL = "http://127.0.0.1:3000/context"
+DEFAULT_OUTBOX_PATH = Path(__file__).resolve().parent / "latest_brain_call.json"
+LATEST_BRAIN_CALL_PATH = DEFAULT_OUTBOX_PATH
+
+_NON_FILE_WINDOW_TITLES = frozenset(
+    {
+        "desktop",
+        "command prompt",
+        "windows powershell",
+        "powershell",
+        "cmd.exe",
+        "program manager",
+        "task switching",
+        "unknown",
+    }
+)
+
+
+def sanitize_editor_active_file(candidate: Optional[str]) -> str:
+    """Validate an IDE-supplied `activeFile` and reject raw OS window titles."""
+    if not isinstance(candidate, str):
+        return ""
+    cleaned = candidate.strip()
+    if not cleaned:
+        return ""
+    if any(ch in cleaned for ch in ("\r", "\n", "\x00")):
+        return ""
+    # Reject Win32 window titles such as "utils.py - WHACK - Visual Studio Code"
+    if " - " in cleaned or " — " in cleaned or " • " in cleaned:
+        return ""
+    if cleaned.lower() in _NON_FILE_WINDOW_TITLES:
+        return ""
+    return cleaned
 
 
 @dataclass
@@ -75,48 +107,15 @@ class BrainInput:
         }
 
 
-# ==============================================================================
-# PLUG-AND-PLAY HOOK FOR TEAMMATE'S BRAIN (Role 3)
-# Once your teammate's `brain` module/API is ready, swap its call right here
-# (or pass a callback to `ActiveBrainCaller.register_callback(...)` / toggle HTTP `[B]`).
-# ==============================================================================
-def call_teammate_brain(brain_input: BrainInput, full_payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Placeholder Main Brain receiver consuming the 3 coordinates + 6 emotions right now."""
-    mx, my = brain_input.mouse_cursor
-    cx, cy = brain_input.keyboard_cursor
-    gx, gy = brain_input.eye_gaze
-    emos = brain_input.emotions
-
-    dist_to_caret = math.hypot(gx - cx, gy - cy)
-    dist_to_mouse = math.hypot(gx - mx, gy - my)
-    if brain_input.keyboard_cursor_detected and dist_to_caret <= 240:
-        focus_spot = f"near keyboard_cursor | ({cx},{cy}) [{dist_to_caret:.0f}px]"
-    elif dist_to_mouse <= 220:
-        focus_spot = f"near mouse_cursor ({mx},{my}) [{dist_to_mouse:.0f}px]"
-    else:
-        focus_spot = f"screen point ({gx},{gy}) [{brain_input.gaze_zone}]"
-
-    top2 = sorted(emos.items(), key=lambda kv: kv[1], reverse=True)[:2]
-    emo_tag = ", ".join(f"{k}={v:.2f}" for k, v in top2)
-
-    return {
-        "accepted": True,
-        "mode": "placeholder_brain_stub",
-        "focus_target": focus_spot,
-        "summary": (
-            f"[Placeholder Brain] Received 3 coords + 6 emotions | "
-            f"Gaze {focus_spot} | Top emotions: {emo_tag}"
-        ),
-    }
-
-
 @dataclass
 class BrainCallRecord:
     """Audit entry for each active call dispatched to Role 3 Brain."""
 
     call_id: int
+    timestamp: float
     timestamp_str: str
     trigger_status: str
+    confidence: float
     mouse_cursor: Tuple[int, int]
     keyboard_cursor: Tuple[int, int]
     eye_gaze: Tuple[int, int]
@@ -127,6 +126,40 @@ class BrainCallRecord:
     response_summary: str
     clean_input: Dict[str, Any]
     payload: Dict[str, Any]
+    reasons: List[str] = field(default_factory=list)
+    diagnosis_result: Optional[str] = None
+    diagnosis_id: Optional[str] = None
+    file: Optional[str] = None
+    lines: Optional[List[int]] = None
+    quip: Optional[str] = None
+    source: Optional[str] = None
+    error: Optional[str] = None
+    http_dispatched: bool = False
+    http_completed: bool = False
+    http_error: Optional[str] = None
+
+    def to_outbox_dict(self) -> Dict[str, Any]:
+        """Serialize record to the locked `signals/latest_brain_call.json` outbox schema."""
+        return {
+            "call_id": self.call_id,
+            "timestamp": self.timestamp,
+            "http_dispatched": self.http_dispatched,
+            "http_completed": self.http_completed,
+            "http_error": self.http_error,
+            "user_status": self.trigger_status,
+            "confidence": self.confidence,
+            "reasons": list(self.reasons),
+            "diagnosis_summary": self.diagnosis_result,
+            "source": self.source,
+            "diagnosis_id": self.diagnosis_id,
+            "file": self.file,
+            "lines": self.lines,
+            "quip": self.quip,
+            "error": self.error,
+            "coordinates": self.clean_input.get("coordinates"),
+            "emotions": dict(self.emotions),
+            "payload": self.payload,
+        }
 
 
 def build_brain_input(status: UserStatusResult) -> BrainInput:
@@ -147,15 +180,102 @@ def build_brain_call_payload(
     status: UserStatusResult,
     sig: SignalSnapshot,
     terminal_state: Optional[Dict[str, Any]] = None,
+    core_context: Optional[Dict[str, Any]] = None,
+    call_id: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """Construct outgoing Brain JSON with 3 coordinates + 6 emotions at top level + optional context."""
+    """Construct outgoing `/diagnose` JSON payload enriched with `:3000/context` when available."""
     b_in = build_brain_input(status)
     mx, my = b_in.mouse_cursor
     cx, cy = b_in.keyboard_cursor
     gx, gy = b_in.eye_gaze
+    sw, sh = get_screen_size_px()
+
+    ctx = core_context if isinstance(core_context, dict) else {}
+    raw_repo = ctx.get("workspaceRoot")
+    repo_path: Optional[str] = (
+        str(raw_repo).strip() if isinstance(raw_repo, str) and raw_repo.strip() else None
+    )
+
+    ctx_ed = ctx.get("editorState")
+    if not isinstance(ctx_ed, dict):
+        ctx_ed = {}
+
+    # NEVER pass sig.active_window_title as editorState.activeFile!
+    active_file = sanitize_editor_active_file(ctx_ed.get("activeFile"))
+    raw_line = ctx_ed.get("cursorLine")
+    raw_col = ctx_ed.get("cursorColumn")
+    raw_sel = ctx_ed.get("selectionText")
+    raw_diag_cnt = ctx_ed.get("diagnosticsCount")
+    raw_diag_sum = ctx_ed.get("diagnosticsSummary")
+
+    editor_state: Dict[str, Any] = {
+        "activeFile": active_file,
+        "cursorLine": int(raw_line) if isinstance(raw_line, int) and not isinstance(raw_line, bool) else None,
+        "cursorColumn": int(raw_col) if isinstance(raw_col, int) and not isinstance(raw_col, bool) else None,
+        "selectionText": redact_secrets(str(raw_sel)) if isinstance(raw_sel, str) else None,
+        "diagnosticsCount": (
+            int(raw_diag_cnt)
+            if isinstance(raw_diag_cnt, (int, float)) and not isinstance(raw_diag_cnt, bool)
+            else 0
+        ),
+        "diagnosticsSummary": redact_secrets(str(raw_diag_sum)) if isinstance(raw_diag_sum, str) else "",
+        "cursorDwellMs": sig.keyboard_dwell_ms,
+        "isUndo": sig.undo_erase_burst > 0,
+        "isRedo": sig.undo_redo_flips > 0,
+    }
+
+    resolved_terminal = terminal_state
+    if resolved_terminal is None:
+        ctx_term = ctx.get("terminalState")
+        if isinstance(ctx_term, dict) and (
+            ctx_term.get("command")
+            or ctx_term.get("tailOutput")
+            or ctx_term.get("exitCode") is not None
+        ):
+            raw_exit = ctx_term.get("exitCode")
+            raw_dur = ctx_term.get("durationMs")
+            resolved_terminal = {
+                "command": redact_secrets(str(ctx_term.get("command") or ""))[:200],
+                "exitCode": (
+                    int(raw_exit)
+                    if isinstance(raw_exit, int) and not isinstance(raw_exit, bool)
+                    else 0
+                ),
+                "durationMs": (
+                    int(raw_dur)
+                    if isinstance(raw_dur, (int, float)) and not isinstance(raw_dur, bool)
+                    else 0
+                ),
+                "tailOutput": redact_secrets(str(ctx_term.get("tailOutput") or ""))[-800:],
+            }
+
+    win_title = redact_secrets((sig.active_window_title or "").strip())
+    attempt_log = status.attempt_summary
+    if win_title:
+        attempt_log = (
+            f"{attempt_log} [activeWindow: {win_title}]"
+            if attempt_log
+            else f"[activeWindow: {win_title}]"
+        )
 
     return {
-        # --- 1. Grouped & Top-Level 3 Coordinates + 6 Emotions (Primary Contract) ---
+        # --- Locked `:5002/diagnose` Cross-Component Contract Fields ---
+        "callId": call_id,
+        "captureScreenshot": True,
+        "repoPath": repo_path,
+        "hintLevel": status.recommended_hint_level,
+        "userStatus": status.status,
+        "reasons": list(status.reasons),
+        "emotions": dict(b_in.emotions),
+        "gazePoint": [gx, gy] if status.face_detected else None,
+        "cursorScreenPos": [mx, my],
+        "caretScreenPos": [cx, cy] if status.keyboard_cursor_detected else None,
+        "screenWidth": sw,
+        "screenHeight": sh,
+        "editorState": editor_state,
+        "terminalState": resolved_terminal,
+        "attemptLog": attempt_log,
+        # --- Grouped & Top-Level 3 Coordinates + Multimodal Status Metadata ---
         "coordinates": {
             "mouse_cursor": {"x": mx, "y": my},
             "keyboard_cursor": {"x": cx, "y": cy, "detected": status.keyboard_cursor_detected},
@@ -179,18 +299,13 @@ def build_brain_call_payload(
             "x": gx,
             "y": gy,
             "zone": status.gaze_zone,
+            "detected": status.face_detected,
             "dist_to_keyboard_cursor_px": status.dist_gaze_to_caret_px,
         },
-        "emotions": dict(b_in.emotions),
-        # --- Role 3 `DiagnoseRequest` spatial coordinate fields (matches `brain/models.py`) ---
-        "gazePoint": [gx, gy],
-        "cursorScreenPos": [mx, my],
-        "caretScreenPos": [cx, cy] if status.keyboard_cursor_detected else None,
-        "screenWidth": get_screen_size_px()[0],
-        "screenHeight": get_screen_size_px()[1],
-        # --- 2. Extra Context (available if Role 3 wants status/dwell/terminal metadata) ---
         "user_status": {
             "state": status.status,
+            "confusion_type": getattr(status, "confusion_type", None),
+            "diagnostics_count": getattr(status, "diagnostics_count", 0),
             "stuck_score": status.stuck_score,
             "signal_score": status.signal_score,
             "facial_score": status.facial_score,
@@ -199,16 +314,6 @@ def build_brain_call_payload(
             "body_gesture": status.body_gesture,
             "reasons": list(status.reasons),
         },
-        "hintLevel": status.recommended_hint_level,
-        "attemptLog": status.attempt_summary,
-        "editorState": {
-            "activeFile": sig.active_window_title,
-            "cursorDwellMs": sig.keyboard_dwell_ms,
-            "isUndo": sig.undo_erase_burst > 0,
-            "isRedo": False,
-            "diagnosticsCount": 0,
-        },
-        "terminalState": terminal_state,
         "stream": False,
         "timestamp": b_in.timestamp_ms,
     }
@@ -220,35 +325,62 @@ class ActiveBrainCaller:
     def __init__(
         self,
         brain_url: str = DEFAULT_BRAIN_URL,
-        http_enabled: bool = False,
+        http_enabled: bool = True,
+        http_timeout_sec: float = 50.0,
+        core_context_url: str = DEFAULT_CORE_CONTEXT_URL,
+        outbox_path: Optional[Union[Path, str]] = DEFAULT_OUTBOX_PATH,
         write_json_outbox: bool = True,
         console_log: bool = True,
+        on_complete_callback: Optional[Callable[[BrainCallRecord], None]] = None,
     ) -> None:
         self.brain_url = brain_url
-        self.http_enabled = bool(http_enabled)
-        self.write_json_outbox = bool(write_json_outbox)
+        env_http = os.environ.get("WHACK_BRAIN_HTTP")
+        if env_http is not None and env_http.strip().lower() in ("0", "false", "no", "off"):
+            self.http_enabled: bool = False
+        else:
+            self.http_enabled = bool(http_enabled)
+        self.http_timeout_sec: float = float(http_timeout_sec)
+        self.core_context_url: str = core_context_url
+        self.write_json_outbox: bool = bool(write_json_outbox)
+        self.outbox_path: Optional[Path] = (
+            Path(outbox_path) if (outbox_path is not None and self.write_json_outbox) else None
+        )
         self.console_log = bool(console_log)
-        self.last_transport_status: str = "Placeholder Brain Stub Active (HTTP :5002 OFF)"
+        self.last_transport_status: str = (
+            "Brain :5002 HTTP Ready" if self.http_enabled else "Brain :5002 HTTP OFF"
+        )
 
         self._callbacks: List[Callable[..., Optional[Dict[str, Any]]]] = []
+        self._completion_callbacks: List[Callable[[BrainCallRecord], None]] = []
+        if on_complete_callback is not None:
+            self._completion_callbacks.append(on_complete_callback)
+
         self._call_counter: int = 0
         self._history: Deque[BrainCallRecord] = deque(maxlen=25)
         self._lock = threading.Lock()
+        self._outbox_lock = threading.Lock()
 
-        self._http_queue: queue.Queue[Optional[Tuple[int, Dict[str, Any]]]] = queue.Queue(maxsize=4)
+        self._http_queue: queue.Queue[Optional[Tuple[BrainCallRecord, Dict[str, Any]]]] = (
+            queue.Queue(maxsize=8)
+        )
         self._stop = threading.Event()
         self._worker_thread = threading.Thread(target=self._http_worker, daemon=True)
         self._worker_thread.start()
 
     def register_callback(self, fn: Callable[..., Optional[Dict[str, Any]]]) -> None:
-        """Register an in-process Role 3 Python function.
+        """Register an in-process Python hook or unit-test receiver.
 
-        Flexibly supports whichever signature your teammate writes:
-          - 1 arg : `fn(brain_input_or_dict)` (receives `BrainInput.to_clean_dict()`)
-          - 4 args: `fn(mouse_cursor, keyboard_cursor, eye_gaze, emotions)` (or legacy 4th arg `payload`)
+        Supports:
+          - 1 arg : `fn(brain_input_dict)` (receives `BrainInput.to_clean_dict()`)
+          - 4 args: `fn(mouse_cursor, keyboard_cursor, eye_gaze, emotions_or_payload)`
           - 5 args: `fn(mouse_cursor, keyboard_cursor, eye_gaze, emotions, payload)`
         """
         self._callbacks.append(fn)
+
+    def register_completion_callback(self, fn: Callable[[BrainCallRecord], None]) -> None:
+        """Register an async completion listener invoked when `_http_worker` finishes."""
+        with self._lock:
+            self._completion_callbacks.append(fn)
 
     @property
     def call_count(self) -> int:
@@ -259,19 +391,57 @@ class ActiveBrainCaller:
         with self._lock:
             return list(self._history)
 
-    def _write_outbox_file(self, clean_dict: Dict[str, Any], full_payload: Dict[str, Any]) -> None:
-        if not self.write_json_outbox:
-            return
+    def _fetch_core_context(self) -> Dict[str, Any]:
+        """Query `GET http://127.0.0.1:3000/context` with a fast 0.5s timeout."""
+        if not self.http_enabled or not self.core_context_url:
+            return {}
         try:
-            out_obj = {
-                **clean_dict,
-                "user_status": full_payload.get("user_status"),
-            }
-            tmp_path = LATEST_BRAIN_CALL_PATH.with_suffix(".tmp")
-            tmp_path.write_text(json.dumps(out_obj, indent=2), encoding="utf-8")
-            tmp_path.replace(LATEST_BRAIN_CALL_PATH)
-        except OSError:
+            resp = requests.get(self.core_context_url, timeout=0.5)
+            if resp.ok and resp.content:
+                data = resp.json()
+                if isinstance(data, dict):
+                    return data
+        except Exception:
             pass
+        return {}
+
+    @staticmethod
+    def _is_suppressed_by_context(
+        ctx: Dict[str, Any], now: Optional[float] = None
+    ) -> Optional[str]:
+        """Check IDE pause/cooldown flags from `:3000/context`."""
+        if not ctx:
+            return None
+        if ctx.get("cameraPaused") is True:
+            return "Suppressed by IDE (cameraPaused=True)"
+        cooldown_until = ctx.get("cooldownUntil")
+        if isinstance(cooldown_until, (int, float)) and not isinstance(cooldown_until, bool):
+            # Support both Unix epoch ms (`Date.now()`) and synthetic monotonic test clocks
+            if cooldown_until >= 1e11:
+                ref_ms = (
+                    (now * 1000.0)
+                    if (now is not None and now >= 1e8)
+                    else (time.time() * 1000.0)
+                )
+            else:
+                ref_ms = (now * 1000.0) if now is not None else (time.monotonic() * 1000.0)
+            if float(cooldown_until) > ref_ms:
+                return "Suppressed by IDE (cooldown active)"
+        return None
+
+    def _write_outbox_file(self, record: BrainCallRecord) -> None:
+        if not self.write_json_outbox or self.outbox_path is None:
+            return
+        target = Path(self.outbox_path)
+        with self._outbox_lock:
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                out_obj = record.to_outbox_dict()
+                tmp_path = target.with_name(f"{target.name}.{threading.get_ident()}.tmp")
+                tmp_path.write_text(json.dumps(out_obj, indent=2), encoding="utf-8")
+                tmp_path.replace(target)
+            except OSError:
+                pass
 
     def invoke_brain(
         self,
@@ -279,8 +449,10 @@ class ActiveBrainCaller:
         sig: SignalSnapshot,
         fusion_engine: Optional[MultimodalStatusFusionEngine] = None,
         now: Optional[float] = None,
+        proactive: bool = False,
+        core_context: Optional[Dict[str, Any]] = None,
     ) -> Optional[BrainCallRecord]:
-        """Actively output the 3 coordinates + 6 emotions to Role 3 Brain.
+        """Actively dispatch the 3 coordinates + 6 emotions + IDE context to Role 3 Brain.
 
         Hard guard: If `status.status == "afk_away"`, NEVER call the main Brain.
         """
@@ -288,11 +460,12 @@ class ActiveBrainCaller:
             self.last_transport_status = "AFK Guard: Skipped Brain call"
             return None
 
-        term_state = fusion_engine.latest_terminal_dict if fusion_engine is not None else None
-        brain_input = build_brain_input(status)
-        clean_dict = brain_input.to_clean_dict()
-        payload = build_brain_call_payload(status, sig, terminal_state=term_state)
-        six_emotions = dict(brain_input.emotions)
+        ctx = core_context if core_context is not None else self._fetch_core_context()
+        if proactive and (self.http_enabled or core_context is not None):
+            suppressed = self._is_suppressed_by_context(ctx, now=now)
+            if suppressed is not None:
+                self.last_transport_status = suppressed
+                return None
 
         if fusion_engine is not None:
             fusion_engine.mark_brain_called(now=now)
@@ -301,9 +474,20 @@ class ActiveBrainCaller:
             self._call_counter += 1
             call_id = self._call_counter
 
-        self._write_outbox_file(clean_dict, payload)
+        term_state = fusion_engine.latest_terminal_dict if fusion_engine is not None else None
+        brain_input = build_brain_input(status)
+        clean_dict = brain_input.to_clean_dict()
+        payload = build_brain_call_payload(
+            status=status,
+            sig=sig,
+            terminal_state=term_state,
+            core_context=ctx,
+            call_id=call_id,
+        )
+        six_emotions = dict(brain_input.emotions)
 
         cb_summary: Optional[str] = None
+        cb_quip: Optional[str] = None
         for cb in self._callbacks:
             try:
                 params = list(inspect.signature(cb).parameters.values())
@@ -332,23 +516,32 @@ class ActiveBrainCaller:
                         status.eye_gaze,
                         payload,
                     )
-                if isinstance(res, dict) and res.get("summary"):
-                    cb_summary = str(res["summary"])
+                if isinstance(res, dict):
+                    if res.get("summary"):
+                        cb_summary = str(res["summary"])
+                    if res.get("quip"):
+                        cb_quip = str(res["quip"])
             except Exception as exc:
                 cb_summary = f"Callback error: {exc.__class__.__name__}"
 
-        if cb_summary:
-            mode = "Python Callback"
-            summary = cb_summary
-            self.last_transport_status = f"Python Callback OK (#{call_id})"
-        elif self.http_enabled:
+        if self.http_enabled:
             mode = f"HTTP POST -> {self.brain_url}"
-            summary = "Dispatching 3 coords + 6 emotions to Role 3 Brain (:5002)..."
+            summary = cb_summary or "Dispatching multimodal telemetry to Brain (:5002/diagnose)..."
+            diag_res = cb_summary
+            src_val: Optional[str] = None
+            self.last_transport_status = f"Brain :5002 HTTP in flight (#{call_id})"
+        elif cb_summary:
+            mode = "Python Callback"
+            summary = f'{cb_summary} — "{cb_quip}"' if cb_quip else cb_summary
+            diag_res = cb_summary
+            src_val = "callback"
+            self.last_transport_status = f"Python Callback OK (#{call_id})"
         else:
-            stub_res = call_teammate_brain(brain_input, payload)
-            mode = "Placeholder Brain Stub"
-            summary = str(stub_res.get("summary", "Dispatched to Placeholder Brain"))
-            self.last_transport_status = f"Outbox -> latest_brain_call.json (#{call_id})"
+            mode = "HTTP Disabled"
+            summary = "HTTP dispatch disabled (Brain :5002 HTTP is OFF)"
+            diag_res = None
+            src_val = None
+            self.last_transport_status = f"Brain :5002 HTTP OFF (#{call_id})"
 
         if self.console_log:
             emo_inline = " ".join(f"{k}={v:.2f}" for k, v in six_emotions.items())
@@ -363,8 +556,10 @@ class ActiveBrainCaller:
 
         rec = BrainCallRecord(
             call_id=call_id,
+            timestamp=time.time(),
             timestamp_str=time.strftime("%H:%M:%S"),
             trigger_status=status.status,
+            confidence=status.confidence,
             mouse_cursor=status.mouse_cursor,
             keyboard_cursor=status.keyboard_cursor,
             eye_gaze=status.eye_gaze,
@@ -375,16 +570,28 @@ class ActiveBrainCaller:
             response_summary=summary,
             clean_input=clean_dict,
             payload=payload,
+            reasons=list(status.reasons),
+            diagnosis_result=diag_res,
+            quip=cb_quip,
+            source=src_val,
+            http_dispatched=False,
+            http_completed=False,
+            http_error=None,
         )
-        with self._lock:
-            self._history.append(rec)
 
         if self.http_enabled:
             try:
-                self._http_queue.put_nowait((call_id, payload))
+                self._http_queue.put_nowait((rec, payload))
+                rec.http_dispatched = True
             except queue.Full:
-                pass
+                rec.http_dispatched = False
+                rec.http_completed = True
+                rec.http_error = "Brain HTTP dispatch queue full"
 
+        with self._lock:
+            self._history.append(rec)
+
+        self._write_outbox_file(rec)
         return rec
 
     def maybe_invoke(
@@ -397,7 +604,13 @@ class ActiveBrainCaller:
         """Automatically invoke Role 3 Brain if `status.should_call_brain` is True and not AFK."""
         if status.status == "afk_away" or not status.should_call_brain:
             return None
-        return self.invoke_brain(status=status, sig=sig, fusion_engine=fusion_engine, now=now)
+        return self.invoke_brain(
+            status=status,
+            sig=sig,
+            fusion_engine=fusion_engine,
+            now=now,
+            proactive=True,
+        )
 
     def _http_worker(self) -> None:
         session = requests.Session()
@@ -408,27 +621,92 @@ class ActiveBrainCaller:
                 continue
             if item is None:
                 break
-            call_id, payload = item
+            rec, payload = item
             try:
-                resp = session.post(self.brain_url, json=payload, timeout=3.5)
-                if resp.ok:
-                    data = resp.json() if resp.content else {}
-                    diag_text = str(data.get("summary") or f"HTTP {resp.status_code} OK")
-                    quip = str(data.get("quip") or "")
-                    full_msg = f"{diag_text} ({quip})" if quip else diag_text
-                    self.last_transport_status = f"Brain :5002 HTTP {resp.status_code} ({time.strftime('%H:%M:%S')})"
-                else:
-                    full_msg = f"Brain :5002 returned HTTP {resp.status_code}"
-                    self.last_transport_status = full_msg
-            except requests.RequestException:
-                full_msg = "Role 3 HTTP (:5002) offline — saved to latest_brain_call.json"
-                self.last_transport_status = "HTTP :5002 offline (saved to latest_brain_call.json)"
+                resp = session.post(
+                    self.brain_url,
+                    json=payload,
+                    timeout=self.http_timeout_sec,
+                )
+                resp.raise_for_status()
+                resp_json = resp.json() if resp.content else {}
+                if (
+                    isinstance(resp_json, dict)
+                    and "summary" not in resp_json
+                    and isinstance(resp_json.get("diagnosis"), dict)
+                ):
+                    resp_json = resp_json["diagnosis"]
+                if not isinstance(resp_json, dict):
+                    resp_json = {}
 
-            with self._lock:
-                for rec in self._history:
-                    if rec.call_id == call_id:
-                        rec.response_summary = full_msg
-                        break
+                summary_val = resp_json.get("summary")
+                quip_val = resp_json.get("quip")
+                file_val = resp_json.get("file")
+                raw_lines = resp_json.get("lines")
+                lines_val: Optional[List[int]] = None
+                if isinstance(raw_lines, (list, tuple)) and len(raw_lines) >= 2:
+                    try:
+                        lines_val = [int(raw_lines[0]), int(raw_lines[1])]
+                    except (TypeError, ValueError):
+                        lines_val = None
+                source_val = str(resp_json.get("source") or "model")
+                err_val = resp_json.get("error")
+                diag_id_val = resp_json.get("diagnosisId") or resp_json.get("diagnosis_id")
+                conf_val = resp_json.get("confidence")
+
+                loc_tag = ""
+                if file_val and lines_val:
+                    loc_tag = f" [{file_val}:{lines_val[0]}-{lines_val[1]}]"
+                elif file_val:
+                    loc_tag = f" [{file_val}]"
+
+                diag_str = (
+                    str(summary_val) if summary_val is not None else f"HTTP {resp.status_code} OK"
+                )
+                display_msg = (
+                    f'{diag_str}{loc_tag} — "{quip_val}"' if quip_val else f"{diag_str}{loc_tag}"
+                )
+
+                with self._lock:
+                    rec.diagnosis_id = str(diag_id_val) if diag_id_val is not None else None
+                    rec.diagnosis_result = str(summary_val) if summary_val is not None else None
+                    rec.quip = str(quip_val) if quip_val is not None else None
+                    rec.file = str(file_val) if file_val is not None else None
+                    rec.lines = lines_val
+                    rec.source = source_val
+                    rec.error = str(err_val) if err_val is not None else None
+                    if isinstance(conf_val, (int, float)) and not isinstance(conf_val, bool):
+                        rec.confidence = float(conf_val)
+                    rec.http_completed = True
+                    rec.http_error = None
+                    rec.response_summary = display_msg
+                    rec.timestamp = time.time()
+                    self.last_transport_status = (
+                        f"Brain :5002 OK [{source_val}] ({time.strftime('%H:%M:%S')})"
+                    )
+                    callbacks = list(self._completion_callbacks)
+
+            except Exception as exc:
+                offline_msg = f"[OFFLINE] Brain server (:5002) unreachable: {exc}"
+                with self._lock:
+                    rec.source = "offline"
+                    rec.http_completed = True
+                    rec.http_error = str(exc)
+                    rec.error = str(exc)
+                    rec.diagnosis_result = offline_msg
+                    rec.response_summary = offline_msg
+                    rec.timestamp = time.time()
+                    self.last_transport_status = (
+                        f"Brain :5002 offline ({time.strftime('%H:%M:%S')})"
+                    )
+                    callbacks = list(self._completion_callbacks)
+
+            self._write_outbox_file(rec)
+            for cb in callbacks:
+                try:
+                    cb(rec)
+                except Exception:
+                    pass
 
     def close(self) -> None:
         self._stop.set()
@@ -436,3 +714,7 @@ class ActiveBrainCaller:
             self._http_queue.put_nowait(None)
         except queue.Full:
             pass
+
+
+# Canonical alias so callers can import either `BrainCaller` or `ActiveBrainCaller`
+BrainCaller = ActiveBrainCaller

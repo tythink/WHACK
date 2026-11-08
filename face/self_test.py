@@ -450,7 +450,7 @@ def run_tests() -> None:
     print("3. Verifying Face + Body/Hand Emotions & Multimodal `/events` Payload...")
     profile = reloaded
 
-    def step_multimodal(bs_override: dict, hands=(), pose_override=None, iters: int = 12):
+    def step_multimodal(bs_override: dict, hands=(), pose_override=None, iters: int = 12, sleep_sec: float = 0.0):
         det = EmotionDetector(smoothing_alpha=0.55)
         g_trk = GazeTracker()
         b_trk = BodyGestureTracker()
@@ -460,6 +460,8 @@ def run_tests() -> None:
         bs.update(bs_override)
         emo, gz, bd = None, None, None
         for _ in range(iters):
+            if sleep_sec > 0:
+                time.sleep(sleep_sec)
             hp, hy, hr = extract_head_pose_degrees(cur_lms, ref_mat)
             bd = b_trk.update(cur_lms, cur_pose, hands, hp, hy, hr, profile)
             gz = g_trk.update(
@@ -473,6 +475,25 @@ def run_tests() -> None:
     scratch_hand = _make_hand_at(palm_x=0.72, palm_y=0.30, tip_x=0.66, tip_y=0.22)
     emo_scr, gz_scr, bd_scr = step_multimodal({}, hands=[scratch_hand])
     assert bd_scr.primary_gesture == "head_scratch" and emo_scr.primary_emotion == "confused"
+
+    # Test closed eyes: eye squint & brow down must resolve to fatigued, NOT confused
+    closed_bs = {
+        "eyeBlinkLeft": 1.0,
+        "eyeBlinkRight": 1.0,
+        "eyeSquintLeft": 0.65,
+        "eyeSquintRight": 0.65,
+        "browDownLeft": 0.35,
+        "browDownRight": 0.35,
+    }
+    emo_closed, gz_closed, bd_closed = step_multimodal(closed_bs, iters=12, sleep_sec=0.025)
+    assert gz_closed.eyes_closed is True
+    assert emo_closed.primary_emotion == "fatigued", f"Expected fatigued, got {emo_closed.primary_emotion}"
+    assert emo_closed.emotions["confused"] < 0.20, f"Expected confused < 0.20, got {emo_closed.emotions['confused']}"
+    assert emo_closed.emotions["fatigued"] >= 0.70, f"Expected fatigued >= 0.70, got {emo_closed.emotions['fatigued']}"
+    assert "Fatigue" in emo_closed.fusion_status, f"Expected Fatigue in fusion_status, got {emo_closed.fusion_status}"
+    pl_closed = build_event_payload(emo_closed, gz_closed, bd_closed)
+    assert pl_closed["primary_emotion"] == "fatigued"
+    assert pl_closed["state"] == "fatigued"
 
     f_lm = create_face_landmarker(running_mode="VIDEO")
     p_lm = create_pose_landmarker(running_mode="VIDEO")

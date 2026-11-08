@@ -1,7 +1,7 @@
 """Interactive Multimodal Face + 3D Eyeball + Body/Hand Prototype GUI for WHACK Role 1.
 
 Run from repository root:
-    C:\\Users\\davec\\anaconda3\\envs\\whack-face\\python.exe face/prototype_gui.py
+    python face/prototype_gui.py
 """
 
 from __future__ import annotations
@@ -21,6 +21,12 @@ from typing import Deque, Dict, List, Optional, Sequence
 import cv2
 import numpy as np
 from PIL import Image, ImageTk
+
+if sys.platform == "win32":
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
 
 FACE_DIR = Path(__file__).resolve().parent
 if str(FACE_DIR) not in sys.path:
@@ -340,6 +346,11 @@ class PrototypeGUI:
     VIDEO_H = 380
 
     def __init__(self, camera_index: int = 0, events_url: str = DEFAULT_EVENTS_URL) -> None:
+        if sys.platform == "win32":
+            try:
+                ctypes.windll.user32.SetProcessDPIAware()
+            except Exception:
+                pass
         self.root = tk.Tk()
         self.root.title("WHACK Role 1 — Multimodal Face + 3D Eyeball + Body Prototype")
         self.root.configure(bg="#0f172a")
@@ -584,7 +595,7 @@ class PrototypeGUI:
 
         self.http_status_lbl = tk.Label(
             ctrl2,
-            text="Local prototype (not pushed to GitHub)",
+            text="POST :3000 OFF (press P to stream)",
             font=("Segoe UI", 8),
             fg="#94a3b8",
             bg="#0f172a",
@@ -1357,7 +1368,7 @@ class PrototypeGUI:
             bg="#059669" if on else "#334155",
         )
         if not on:
-            self.http_status_lbl.configure(text="Local prototype (not pushed to GitHub)")
+            self.http_status_lbl.configure(text="POST :3000 OFF (press P to stream)")
 
     def _refresh_calibration_badge(self) -> None:
         p = self.calibrator.profile

@@ -34,7 +34,6 @@ var __importStar = (this && this.__importStar) || (function () {
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.WhackHighlightManager = void 0;
-const path = __importStar(require("path"));
 const vscode = __importStar(require("vscode"));
 const fixEngine_1 = require("./fixEngine");
 /**
@@ -42,7 +41,6 @@ const fixEngine_1 = require("./fixEngine");
  * hover cards, and inline CodeLens actions (`Preview Diff | Apply Fix | Ask in Chat | Dismiss`).
  */
 class WhackHighlightManager {
-    extensionPath;
     primaryDecoration;
     secondaryDecoration;
     appliedFlashDecoration;
@@ -53,8 +51,7 @@ class WhackHighlightManager {
     hasApplicableFix = false;
     flashTimer = null;
     disposables = [];
-    constructor(extensionPath) {
-        this.extensionPath = extensionPath;
+    constructor() {
         const primarySvg = encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">` +
             `<circle cx="8" cy="8" r="5.5" fill="#f25533" stroke="#ffffff" stroke-width="1.2"/></svg>`);
         const secondarySvg = encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">` +
@@ -95,14 +92,25 @@ class WhackHighlightManager {
     /**
      * Opens the primary cited file in ViewColumn.One (left side), scrolls to the target lines,
      * and highlights both the primary range and any additional `citations[]`.
+     * Never highlights fake lines when `diagnosis.source === "offline"`.
      */
     async showDiagnosisHighlights(diagnosis, hasFix) {
+        if (diagnosis.source === "offline") {
+            this.clearHighlights();
+            return {};
+        }
+        const primaryFileCandidate = diagnosis.file || diagnosis.citations?.[0]?.file;
+        const primaryLinesCandidate = diagnosis.lines || diagnosis.citations?.[0]?.lines;
+        if (!primaryFileCandidate || !primaryLinesCandidate) {
+            this.clearHighlights();
+            return {};
+        }
         this.activeDiagnosis = diagnosis;
         this.hasApplicableFix = hasFix;
         this.resolvedHighlights = [];
         // 1. Resolve primary target range
-        const primaryUri = await (0, fixEngine_1.resolveTargetFileUri)(diagnosis.file || diagnosis.citations?.[0]?.file, this.extensionPath);
-        const primaryLines = diagnosis.lines || diagnosis.citations?.[0]?.lines || [1, 1];
+        const primaryUri = await (0, fixEngine_1.resolveTargetFileUri)(primaryFileCandidate, diagnosis.repoPath);
+        const primaryLines = primaryLinesCandidate;
         if (primaryUri) {
             this.resolvedHighlights.push({
                 uri: primaryUri,
@@ -115,7 +123,7 @@ class WhackHighlightManager {
         }
         // 2. Resolve any additional secondary citations
         for (const cit of diagnosis.citations ?? []) {
-            const citUri = await (0, fixEngine_1.resolveTargetFileUri)(cit.file, this.extensionPath);
+            const citUri = await (0, fixEngine_1.resolveTargetFileUri)(cit.file, diagnosis.repoPath);
             if (!citUri)
                 continue;
             const isDuplicatePrimary = primaryUri &&
@@ -136,15 +144,17 @@ class WhackHighlightManager {
         // 3. Open & reveal primary location in left-hand editor column (`ViewColumn.One`)
         if (primaryUri) {
             const doc = await vscode.workspace.openTextDocument(primaryUri);
-            const s0 = Math.max(0, Math.min(doc.lineCount - 1, primaryLines[0] - 1));
-            const e0 = Math.max(s0, Math.min(doc.lineCount - 1, primaryLines[1] - 1));
-            const revealRange = new vscode.Range(new vscode.Position(s0, 0), doc.lineAt(e0).range.end);
-            const editor = await vscode.window.showTextDocument(doc, {
-                viewColumn: vscode.ViewColumn.One,
-                preserveFocus: false,
-                preview: false,
-            });
-            editor.revealRange(revealRange, vscode.TextEditorRevealType.InCenter);
+            if (doc.lineCount > 0) {
+                const s0 = Math.max(0, Math.min(doc.lineCount - 1, primaryLines[0] - 1));
+                const e0 = Math.max(s0, Math.min(doc.lineCount - 1, primaryLines[1] - 1));
+                const revealRange = new vscode.Range(new vscode.Position(s0, 0), doc.lineAt(e0).range.end);
+                const editor = await vscode.window.showTextDocument(doc, {
+                    viewColumn: vscode.ViewColumn.One,
+                    preserveFocus: false,
+                    preview: false,
+                });
+                editor.revealRange(revealRange, vscode.TextEditorRevealType.InCenter);
+            }
         }
         this.refreshVisibleEditors();
         this.codeLensChange.fire();
@@ -156,11 +166,13 @@ class WhackHighlightManager {
     /**
      * Jumps the left-hand code editor to a specific `CodeCitation` when clicked in the right-side panel.
      */
-    async jumpToCitation(citation) {
-        const uri = await (0, fixEngine_1.resolveTargetFileUri)(citation.file, this.extensionPath);
+    async jumpToCitation(citation, repoPath) {
+        const uri = await (0, fixEngine_1.resolveTargetFileUri)(citation.file, repoPath ?? this.activeDiagnosis?.repoPath);
         if (!uri)
             return;
         const doc = await vscode.workspace.openTextDocument(uri);
+        if (doc.lineCount === 0)
+            return;
         const s0 = Math.max(0, Math.min(doc.lineCount - 1, citation.lines[0] - 1));
         const e0 = Math.max(s0, Math.min(doc.lineCount - 1, citation.lines[1] - 1));
         const range = new vscode.Range(new vscode.Position(s0, 0), doc.lineAt(e0).range.end);
@@ -179,6 +191,8 @@ class WhackHighlightManager {
     async flashAppliedFix(uri, range) {
         this.clearHighlights();
         const doc = await vscode.workspace.openTextDocument(uri);
+        if (doc.lineCount === 0)
+            return;
         const editor = await vscode.window.showTextDocument(doc, {
             viewColumn: vscode.ViewColumn.One,
             preserveFocus: false,
@@ -228,10 +242,14 @@ class WhackHighlightManager {
         const primary = this.resolvedHighlights.find((h) => h.isPrimary);
         if (!primary)
             return {};
+        const wf = vscode.workspace.getWorkspaceFolder(primary.uri);
+        const relFile = wf
+            ? vscode.workspace.asRelativePath(primary.uri, false).replace(/\\/g, "/")
+            : primary.uri.fsPath.replace(/\\/g, "/");
         const openDoc = vscode.workspace.textDocuments.find((d) => d.uri.fsPath.toLowerCase() === primary.uri.fsPath.toLowerCase());
-        if (!openDoc) {
+        if (!openDoc || openDoc.lineCount === 0) {
             return {
-                file: path.basename(primary.uri.fsPath),
+                file: relFile,
                 lines: [primary.startLine1, primary.endLine1],
             };
         }
@@ -239,7 +257,7 @@ class WhackHighlightManager {
         const e0 = Math.max(s0, Math.min(openDoc.lineCount - 1, primary.endLine1 - 1));
         const range = new vscode.Range(new vscode.Position(s0, 0), openDoc.lineAt(e0).range.end);
         return {
-            file: path.basename(primary.uri.fsPath),
+            file: relFile,
             lines: [primary.startLine1, primary.endLine1],
             snippet: openDoc.getText(range),
         };
@@ -248,7 +266,7 @@ class WhackHighlightManager {
         for (const editor of vscode.window.visibleTextEditors) {
             const editorPath = editor.document.uri.fsPath.toLowerCase();
             const matching = this.resolvedHighlights.filter((h) => h.uri.fsPath.toLowerCase() === editorPath);
-            if (matching.length === 0) {
+            if (matching.length === 0 || editor.document.lineCount === 0) {
                 editor.setDecorations(this.primaryDecoration, []);
                 editor.setDecorations(this.secondaryDecoration, []);
                 continue;
@@ -261,7 +279,6 @@ class WhackHighlightManager {
                 const e0 = Math.max(s0, Math.min(doc.lineCount - 1, item.endLine1 - 1));
                 const range = new vscode.Range(new vscode.Position(s0, 0), doc.lineAt(e0).range.end);
                 const shortLabel = item.note.length > 68 ? `${item.note.slice(0, 65)}...` : item.note;
-                // Place inline ghost note ONLY on the first line of the range so multi-line blocks stay clean
                 const firstLineRange = doc.lineAt(s0).range;
                 const blockOpt = { range };
                 const labelOpt = {
@@ -287,7 +304,7 @@ class WhackHighlightManager {
         }
     }
     provideCodeLenses(document) {
-        if (!this.activeDiagnosis)
+        if (!this.activeDiagnosis || document.lineCount === 0)
             return [];
         const docPath = document.uri.fsPath.toLowerCase();
         const lenses = [];

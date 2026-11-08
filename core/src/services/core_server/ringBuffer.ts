@@ -10,12 +10,13 @@ const DEFAULT_CAPACITY = 100;
 
 /**
  * In-memory ring buffer storing the last 100 events ingested at `POST /events`,
- * plus the latest snapshot of Face, Editor, and Terminal states.
+ * plus the latest snapshot of Workspace, Face, Editor, and Terminal states.
  */
 export class EventRingBuffer {
   private readonly capacity: number;
   private events: BaseEvent[] = [];
 
+  private workspaceRoot: string | null = null;
   private latestFace: FacePayload | null = null;
   private latestEditor: EditorPayload | null = null;
   private latestTerminal: TerminalPayload | null = null;
@@ -56,7 +57,11 @@ export class EventRingBuffer {
         };
       }
     } else if (event.source === "editor") {
+      if (typeof payload.workspaceRoot === "string" && payload.workspaceRoot.trim()) {
+        this.workspaceRoot = payload.workspaceRoot.trim();
+      }
       this.latestEditor = {
+        workspaceRoot: this.workspaceRoot ?? undefined,
         activeFile:
           typeof payload.activeFile === "string"
             ? payload.activeFile
@@ -67,6 +72,10 @@ export class EventRingBuffer {
           typeof payload.diagnosticsCount === "number"
             ? payload.diagnosticsCount
             : 0,
+        diagnosticsSummary:
+          typeof payload.diagnosticsSummary === "string"
+            ? payload.diagnosticsSummary
+            : undefined,
         cursorDwellMs:
           typeof payload.cursorDwellMs === "number" ? payload.cursorDwellMs : 0,
         topDiagnostics: Array.isArray(payload.topDiagnostics)
@@ -75,6 +84,14 @@ export class EventRingBuffer {
         cursorLine:
           typeof payload.cursorLine === "number"
             ? payload.cursorLine
+            : undefined,
+        cursorColumn:
+          typeof payload.cursorColumn === "number"
+            ? payload.cursorColumn
+            : undefined,
+        selectionText:
+          typeof payload.selectionText === "string"
+            ? payload.selectionText
             : undefined,
       };
     } else if (event.source === "terminal") {
@@ -89,6 +106,74 @@ export class EventRingBuffer {
           typeof payload.tailOutput === "string" ? payload.tailOutput : "",
       };
     }
+  }
+
+  public updateContext(ctx: {
+    workspaceRoot?: string | null;
+    editorState?: Partial<EditorPayload> | null;
+    terminalState?: Partial<TerminalPayload> | null;
+  }): void {
+    if (typeof ctx.workspaceRoot === "string" && ctx.workspaceRoot.trim()) {
+      this.workspaceRoot = ctx.workspaceRoot.trim();
+    }
+
+    if (ctx.editorState && typeof ctx.editorState === "object") {
+      const ed = ctx.editorState;
+      this.latestEditor = {
+        workspaceRoot: this.workspaceRoot ?? this.latestEditor?.workspaceRoot,
+        activeFile:
+          typeof ed.activeFile === "string"
+            ? ed.activeFile
+            : this.latestEditor?.activeFile ?? "",
+        isUndo: Boolean(ed.isUndo ?? this.latestEditor?.isUndo),
+        isRedo: Boolean(ed.isRedo ?? this.latestEditor?.isRedo),
+        diagnosticsCount:
+          typeof ed.diagnosticsCount === "number"
+            ? ed.diagnosticsCount
+            : this.latestEditor?.diagnosticsCount ?? 0,
+        diagnosticsSummary:
+          typeof ed.diagnosticsSummary === "string"
+            ? ed.diagnosticsSummary
+            : this.latestEditor?.diagnosticsSummary ?? "",
+        cursorDwellMs:
+          typeof ed.cursorDwellMs === "number"
+            ? ed.cursorDwellMs
+            : this.latestEditor?.cursorDwellMs ?? 0,
+        topDiagnostics: ed.topDiagnostics ?? this.latestEditor?.topDiagnostics,
+        cursorLine:
+          typeof ed.cursorLine === "number"
+            ? ed.cursorLine
+            : this.latestEditor?.cursorLine ?? 1,
+        cursorColumn:
+          typeof ed.cursorColumn === "number"
+            ? ed.cursorColumn
+            : this.latestEditor?.cursorColumn ?? 1,
+        selectionText:
+          typeof ed.selectionText === "string"
+            ? ed.selectionText
+            : this.latestEditor?.selectionText ?? "",
+      };
+    }
+
+    if (ctx.terminalState && typeof ctx.terminalState === "object") {
+      const tm = ctx.terminalState;
+      if (typeof tm.command === "string") {
+        this.latestTerminal = {
+          command: tm.command,
+          exitCode: typeof tm.exitCode === "number" ? tm.exitCode : 0,
+          durationMs: typeof tm.durationMs === "number" ? tm.durationMs : 0,
+          errorHash: tm.errorHash ?? this.latestTerminal?.errorHash,
+          tailOutput:
+            typeof tm.tailOutput === "string"
+              ? tm.tailOutput
+              : this.latestTerminal?.tailOutput ?? "",
+        };
+      }
+    }
+  }
+
+  public getWorkspaceRoot(): string | null {
+    return this.workspaceRoot;
   }
 
   public applyFeedback(feedback: FeedbackPayload): void {
@@ -139,6 +224,7 @@ export class EventRingBuffer {
 
   public getSnapshot() {
     return {
+      workspaceRoot: this.workspaceRoot,
       faceState: this.latestFace?.state ?? "calm",
       confusionScore: this.latestFace?.score ?? 0,
       latestFace: this.latestFace,

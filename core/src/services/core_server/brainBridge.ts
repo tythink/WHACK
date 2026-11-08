@@ -8,31 +8,58 @@ import {
 import { WsHub } from "./wsHub";
 
 const BRAIN_SERVICE_URL =
-  process.env.BRAIN_SERVICE_URL || "http://localhost:5002/diagnose";
+  process.env.BRAIN_SERVICE_URL || "http://127.0.0.1:5002/diagnose";
 const BRAIN_CHAT_URL =
   process.env.BRAIN_CHAT_URL ||
   BRAIN_SERVICE_URL.replace(/\/diagnose\/?$/, "/chat");
 
+const BRAIN_HTTP_TIMEOUT_MS = 28000;
+
+function buildOfflineDiagnosis(
+  req: DiagnosisRequest,
+  errorDetail: string
+): DiagnosisResponse {
+  return {
+    diagnosisId: `offline-${Date.now()}`,
+    summary: "WHACK Brain (:5002) is offline.",
+    file: undefined,
+    lines: undefined,
+    quip: "Start brain.server on port 5002 so I can actually see what you're cooking.",
+    uncertain: true,
+    hintLevel: req.hintLevel || "hint",
+    source: "offline",
+    error: errorDetail,
+    repoPath: req.repoPath,
+    reasons: req.fusionReasons,
+    confidence: 0,
+    explanation: `Could not reach ${BRAIN_SERVICE_URL} (${errorDetail}). Run \`python -m uvicorn brain.server:app --port 5002\` with an API key in \`brain/.env\`.`,
+    citations: [],
+    suggestedFix: null,
+  };
+}
+
 /**
- * Calls Role 3's Brain Service (`http://localhost:5002/diagnose`) if reachable,
- * or falls back seamlessly to the Role 3 / Role 4 Stub diagnosis streamer
- * so `/diagnose` and Checkpoint A work even when running Core solo.
+ * Forwards diagnosis requests to Role 3's Brain Service (`POST :5002/diagnose`) with a 28s timeout.
+ * Returns an honest `source: "offline"` payload when `:5002` is unreachable (unless `USE_BRAIN_STUB=true`
+ * is explicitly set by isolated `verify.ts` contract tests).
  */
 export async function runDiagnosis(
   req: DiagnosisRequest,
   wsHub: WsHub
 ): Promise<DiagnosisResponse> {
-  // 1. Try forwarding to Role 3's external Brain service on :5002 if it's running
   if (process.env.USE_BRAIN_STUB !== "true") {
     try {
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 3500);
+      const timeout = setTimeout(() => controller.abort(), BRAIN_HTTP_TIMEOUT_MS);
       const res = await fetch(BRAIN_SERVICE_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           hintLevel: req.hintLevel,
+          repoPath: req.repoPath ?? req.editorState?.workspaceRoot,
+          captureScreenshot: req.captureScreenshot ?? true,
           screenshot: req.screenshot,
+          fusionReasons: req.fusionReasons,
           attemptLog: req.attemptLog ?? req.recentEvents,
           editorState: req.editorState ?? req.latestEditor,
           terminalState: req.terminalState ?? req.latestTerminal,
@@ -43,32 +70,48 @@ export async function runDiagnosis(
       clearTimeout(timeout);
 
       if (res.ok) {
-        const data = (await res.json()) as Partial<DiagnosisResponse>;
-        const activeFile =
-          data.file ??
-          req.editorState?.activeFile ??
-          req.latestEditor?.activeFile ??
-          "utils.py";
+        const data = (await res.json()) as Partial<DiagnosisResponse> & {
+          diagnosis_id?: string;
+          repo_path?: string;
+          suggested_fix?: DiagnosisResponse["suggestedFix"];
+        };
 
-        const combinedSummary =
-          data.explanation && req.hintLevel === "full_explanation"
-            ? `${data.summary || ""}\n\n${data.explanation}`
-            : data.summary ||
-              "Index error on line 42: loop bound exceeds list length.";
-
+        const isOffline = data.source === "offline";
         const diagnosis: DiagnosisResponse = {
-          summary: combinedSummary,
-          file: activeFile,
-          lines: data.lines ?? [40, 45],
+          diagnosisId: data.diagnosisId ?? data.diagnosis_id,
+          summary:
+            data.summary ||
+            (isOffline
+              ? "WHACK Brain (:5002) is offline."
+              : "WHACK Brain completed analysis."),
+          file: isOffline ? undefined : data.file || undefined,
+          lines: isOffline
+            ? undefined
+            : Array.isArray(data.lines)
+            ? data.lines
+            : undefined,
           quip:
-            data.quip || "Computers do what you say, not what you want.",
-          uncertain: Boolean(data.uncertain),
+            data.quip ||
+            (isOffline
+              ? "Start brain.server on port 5002 so I can actually see what you're cooking."
+              : "Computers do what you say, not what you want."),
+          uncertain: isOffline ? true : Boolean(data.uncertain),
           hintLevel: data.hintLevel ?? req.hintLevel ?? "hint",
+          source: isOffline ? "offline" : "model",
+          error: data.error,
+          repoPath: data.repoPath ?? data.repo_path ?? req.repoPath,
           reasons: data.reasons ?? req.fusionReasons,
-          confidence: data.confidence ?? 0.95,
+          confidence:
+            typeof data.confidence === "number"
+              ? data.confidence
+              : isOffline
+              ? 0
+              : 0.95,
           explanation: data.explanation,
-          citations: data.citations,
-          suggestedFix: data.suggestedFix,
+          citations: isOffline ? [] : data.citations,
+          suggestedFix: isOffline
+            ? null
+            : (data.suggestedFix ?? data.suggested_fix ?? null),
         };
 
         wsHub.broadcast({
@@ -81,12 +124,31 @@ export async function runDiagnosis(
         });
         return diagnosis;
       }
-    } catch {
-      // Role 3 Brain server isn't running yet -> fall through to built-in streaming stub
+
+      const httpErr = `HTTP ${res.status} ${res.statusText || ""}`.trim();
+      const offlineResp = buildOfflineDiagnosis(req, httpErr);
+      wsHub.broadcast({
+        type: "diagnosis_done",
+        diagnosis: offlineResp,
+      });
+      return offlineResp;
+    } catch (err: unknown) {
+      const errDetail =
+        err instanceof Error
+          ? err.name === "AbortError"
+            ? `Timed out after ${BRAIN_HTTP_TIMEOUT_MS / 1000}s`
+            : err.message
+          : String(err);
+      const offlineResp = buildOfflineDiagnosis(req, errDetail);
+      wsHub.broadcast({
+        type: "diagnosis_done",
+        diagnosis: offlineResp,
+      });
+      return offlineResp;
     }
   }
 
-  // 2. Built-in Streaming Stub (matches AGENT_ROLE3_BRAIN.md 0:00-0:45 stub + 3 hint levels)
+  // Isolated unit-test stub (`USE_BRAIN_STUB=true` in `verify.ts`)
   const activeFile =
     req.editorState?.activeFile || req.latestEditor?.activeFile || "utils.py";
   const hintLevel: HintLevel = req.hintLevel || "hint";
@@ -103,7 +165,6 @@ export async function runDiagnosis(
 
   const fullText = summaryByLevel[hintLevel];
 
-  // Stream markdown chunks over WebSocket so the UI renders a real-time typing effect
   const words = fullText.split(" ");
   const chunkSize = Math.max(2, Math.ceil(words.length / 5));
   for (let i = 0; i < words.length; i += chunkSize) {
@@ -124,6 +185,7 @@ export async function runDiagnosis(
     quip: "Computers do what you say, not what you want.",
     uncertain: false,
     hintLevel,
+    source: "model",
     reasons:
       req.fusionReasons && req.fusionReasons.length > 0
         ? req.fusionReasons
@@ -147,21 +209,14 @@ export async function runDiagnosis(
 }
 
 /**
- * Follow-up conversational endpoint (`POST /chat`) for the right-side IDE Chatbox.
- * Tries Role 3's Brain service (`:5002/chat` or `:5002/diagnose`) first and falls back
- * cleanly to a context-aware Mock Brain reply while Role 3 is still being built.
+ * Follow-up conversational endpoint (`POST /chat`) forwarding directly to `:5002/chat` (28s timeout).
+ * Never falls back to `/diagnose` (which broadcasts to `:3000/events`) or fake Mock Brain prose.
  */
 export async function runBrainChat(req: ChatRequest): Promise<ChatResponse> {
-  const question = (req.message || "").trim();
-  const file = req.activeFile || req.latestDiagnosis?.file || "utils.py";
-  const range = req.highlightedLines || req.latestDiagnosis?.lines;
-  const lineTag = range ? `L${range[0]}–${range[1]}` : "highlighted region";
-
   if (process.env.USE_BRAIN_STUB !== "true") {
-    // 1a. Try dedicated Brain `/chat` endpoint if Role 3 adds one
     try {
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 3500);
+      const timeout = setTimeout(() => controller.abort(), BRAIN_HTTP_TIMEOUT_MS);
       const res = await fetch(BRAIN_CHAT_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -171,92 +226,43 @@ export async function runBrainChat(req: ChatRequest): Promise<ChatResponse> {
       clearTimeout(timeout);
       if (res.ok) {
         const data = (await res.json()) as Partial<ChatResponse> & {
-          summary?: string;
-          explanation?: string;
+          source?: string;
+          suggested_fix?: ChatResponse["suggestedFix"];
         };
-        const reply =
-          data.reply || data.explanation || data.summary || "Received from Brain.";
+        const isOffline = data.mode === "offline" || data.source === "offline";
         return {
-          reply,
-          mode: "brain_live",
+          reply: data.reply || "No reply returned from Brain.",
+          mode: isOffline ? "offline" : "brain_live",
+          error: data.error,
           citations: data.citations,
-          suggestedFix: data.suggestedFix,
+          suggestedFix: data.suggestedFix ?? data.suggested_fix ?? null,
         };
       }
-    } catch {
-      // Fall through to `/diagnose` or mock fallback
+      return {
+        reply:
+          "Brain server (:5002) is unreachable — start `uvicorn brain.server:app --port 5002` to chat live.",
+        mode: "offline",
+        error: `HTTP ${res.status}`,
+      };
+    } catch (err: unknown) {
+      const errDetail =
+        err instanceof Error
+          ? err.name === "AbortError"
+            ? `Timed out after ${BRAIN_HTTP_TIMEOUT_MS / 1000}s`
+            : err.message
+          : String(err);
+      return {
+        reply:
+          "Brain server (:5002) is unreachable — start `uvicorn brain.server:app --port 5002` to chat live.",
+        mode: "offline",
+        error: errDetail,
+      };
     }
-
-    // 1b. Try Role 3's existing `/diagnose` endpoint with user question embedded in attemptLog
-    try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 3500);
-      const res = await fetch(BRAIN_SERVICE_URL, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          hintLevel: "full_explanation",
-          attemptLog: `Follow-up developer question: "${question}"\nCode snippet (${file} ${lineTag}):\n${req.codeSnippet || ""}`,
-          editorState: {
-            activeFile: file,
-            cursorLine: range ? range[0] : 1,
-            selectionText: req.codeSnippet || undefined,
-          },
-          stream: false,
-        }),
-        signal: controller.signal,
-      });
-      clearTimeout(timeout);
-      if (res.ok) {
-        const data = (await res.json()) as Partial<DiagnosisResponse>;
-        const reply = data.explanation
-          ? `${data.summary || ""}\n\n${data.explanation}`.trim()
-          : data.summary || "Checked repository context.";
-        return {
-          reply,
-          mode: "brain_live",
-          citations: data.citations,
-          suggestedFix: data.suggestedFix,
-        };
-      }
-    } catch {
-      // Role 3 Brain offline -> use local Mock Brain reply below
-    }
-  }
-
-  // 2. Context-aware Mock Brain fallback (works right now before Role 3 finishes!)
-  const qLower = question.toLowerCase();
-  const diagSummary = req.latestDiagnosis?.summary || "the highlighted loop boundary";
-
-  if (qLower.includes("hint") || qLower.includes("without") || qLower.includes("spoiler")) {
-    return {
-      mode: "mock_fallback",
-      reply:
-        `**Socratic Hint (\`${file}\` · ${lineTag}):**\n` +
-        `Trace the loop with a tiny input like \`total_items = 5\` and \`window_size = 3\`. ` +
-        `How many valid windows of length 3 fit inside 5 items (indices \`0..3\`, \`1..4\`, \`2..5\`), and what is the last \`start\` index your \`range(...)\` currently produces?`,
-    };
-  }
-
-  if (qLower.includes("edge") || qLower.includes("other") || qLower.includes("test")) {
-    return {
-      mode: "mock_fallback",
-      reply:
-        `**Edge Cases to Verify in \`${file}\`:**\n` +
-        `1. **\`window_size > total_items\`**: \`range(0, total_items - window_size + 1)\` safely yields an empty range \`[]\` in Python rather than negative indices.\n` +
-        `2. **\`window_size == total_items\`**: Produces exactly one window \`[(0, total_items)]\`.\n` +
-        `3. **Downstream \`batch_slice\`**: Once \`end\` never exceeds \`len(data)\`, the \`IndexError\` guard in \`batch_slice\` will no longer trip.`,
-    };
   }
 
   return {
-    mode: "mock_fallback",
+    mode: "offline",
     reply:
-      `**Mock Brain (\`${file}\` · ${lineTag}):**\n` +
-      `Regarding *"${question || "this issue"}"* — ${diagSummary}\n\n` +
-      (req.codeSnippet
-        ? `In your highlighted code:\n\`\`\`python\n${req.codeSnippet.trim()}\n\`\`\`\n`
-        : "") +
-      `You can click **Preview Diff** to inspect the exact line change side-by-side, or **Apply Fix** to patch \`${file}\` directly (undoable anytime with \`Ctrl+Z\`).`,
+      "Brain server (:5002) is unreachable — start `uvicorn brain.server:app --port 5002` to chat live.",
   };
 }

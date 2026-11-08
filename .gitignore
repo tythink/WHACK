@@ -52,3 +52,10 @@ out/
 .DS_Store
 Thumbs.db
 *.log
+
+# WHACK Local Wiki & Runtime Caches
+.whack/
+**/.whack/
+.agents/
+brain/cache/
+signals/latest_brain_call.json

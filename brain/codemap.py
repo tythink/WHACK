@@ -1,32 +1,54 @@
-"""AST-based Code Map for target repository using only Python standard library.
+"""AST-based Code Map for any target workspace using Python standard library.
 
-Builds a structural index of the target codebase:
+Builds a fast structural index of a workspace:
 - Functions and classes with line ranges, signatures, and docstrings
 - Imports
 - Best-effort call graph edges by symbol name
-- Cache invalidated by git HEAD commit hash
+- Per-workspace cache invalidated by git HEAD commit hash and file mtimes
 """
+
+from __future__ import annotations
 
 import ast
 import os
 import subprocess
 from pathlib import Path
-from typing import Dict, List, Any, Optional, Tuple
+from typing import Dict, List, Any, Optional, Tuple, Set
 
-from brain.config import DEMO_REPO_DIR, CACHE_DIR
+from brain.config import resolve_repo_dir
+
+IGNORED_DIRS: Set[str] = {
+    ".git",
+    "node_modules",
+    ".venv",
+    "venv",
+    "__pycache__",
+    "dist",
+    "out",
+    "runtime",
+    ".whack",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    "build",
+    "site-packages",
+    ".tox",
+    ".eggs",
+}
+
 
 class CodeMap:
     def __init__(self, repo_dir: Optional[Path] = None):
-        self.repo_dir = Path(repo_dir or DEMO_REPO_DIR).resolve()
+        self.repo_dir: Path = Path(repo_dir).expanduser().resolve() if repo_dir else resolve_repo_dir()
         self.commit_hash: str = ""
+        self._last_max_mtime: float = 0.0
+        self._last_file_count: int = 0
         self.files: Dict[str, Dict[str, Any]] = {}
-        # Index: symbol_name -> list of caller locations {"file", "caller", "line"}
         self.callers_index: Dict[str, List[Dict[str, Any]]] = {}
-        # Index: (file, symbol_name) -> list of callee names
         self.callees_index: Dict[str, List[str]] = {}
 
     def get_head_commit(self) -> str:
-        """Get the current HEAD commit hash of the repo."""
+        """Get the current HEAD commit hash of the workspace if git is initialized."""
         if not (self.repo_dir / ".git").exists():
             return "no-git"
         try:
@@ -44,24 +66,58 @@ class CodeMap:
             pass
         return "unknown"
 
-    def build(self, force: bool = False):
-        """Build or refresh code map if HEAD changed."""
+    def _discover_python_files(self) -> Tuple[List[Tuple[Path, str]], float]:
+        """Walk workspace pruning ignored directories and return ((full_path, rel_posix), max_mtime)."""
+        py_files: List[Tuple[Path, str]] = []
+        max_mtime = 0.0
+
+        if not self.repo_dir.exists() or not self.repo_dir.is_dir():
+            return py_files, max_mtime
+
+        for root, dirs, files in os.walk(self.repo_dir):
+            dirs[:] = sorted(
+                d for d in dirs if d not in IGNORED_DIRS and not d.endswith(".egg-info")
+            )
+            root_path = Path(root)
+            for fname in sorted(files):
+                if not fname.endswith(".py"):
+                    continue
+                full_path = root_path / fname
+                try:
+                    st = full_path.stat()
+                    if st.st_size > 512_000:
+                        continue
+                    if st.st_mtime > max_mtime:
+                        max_mtime = st.st_mtime
+                    rel_posix = full_path.relative_to(self.repo_dir).as_posix()
+                    py_files.append((full_path, rel_posix))
+                except OSError:
+                    continue
+
+        return py_files, max_mtime
+
+    def build(self, force: bool = False) -> None:
+        """Build or refresh code map if HEAD commit or Python file mtimes changed."""
+        py_files, max_mtime = self._discover_python_files()
         current_head = self.get_head_commit()
-        if not force and self.commit_hash and self.commit_hash == current_head and self.files:
+
+        if (
+            not force
+            and self.files
+            and self.commit_hash == current_head
+            and self._last_max_mtime == max_mtime
+            and self._last_file_count == len(py_files)
+        ):
             return
 
         self.commit_hash = current_head
+        self._last_max_mtime = max_mtime
+        self._last_file_count = len(py_files)
         self.files = {}
         self.callers_index = {}
         self.callees_index = {}
 
-        if not self.repo_dir.exists():
-            return
-
-        for py_path in sorted(self.repo_dir.rglob("*.py")):
-            rel_str = str(py_path.relative_to(self.repo_dir))
-            if any(part in (".git", "__pycache__", ".venv", "venv", ".pytest_cache") for part in py_path.parts):
-                continue
+        for py_path, rel_str in py_files:
             self._parse_file(py_path, rel_str)
 
     def _format_signature(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
@@ -86,7 +142,7 @@ class CodeMap:
             return first_line if first_line else None
         return None
 
-    def _parse_file(self, full_path: Path, rel_path: str):
+    def _parse_file(self, full_path: Path, rel_path: str) -> None:
         try:
             with open(full_path, "r", encoding="utf-8", errors="replace") as f:
                 source = f.read()
@@ -101,7 +157,6 @@ class CodeMap:
             "functions": [],
         }
 
-        # Track imports
         for node in tree.body:
             if isinstance(node, ast.Import):
                 for alias in node.names:
@@ -111,7 +166,6 @@ class CodeMap:
                 names = [a.name for a in node.names]
                 file_info["imports"].append(f"{mod}: {', '.join(names)}")
 
-        # Helper to extract calls inside a node
         def extract_calls(parent_node: ast.AST) -> List[Tuple[str, int]]:
             calls = []
             for child in ast.walk(parent_node):
@@ -125,7 +179,6 @@ class CodeMap:
                         calls.append((name, getattr(child, "lineno", 0)))
             return calls
 
-        # Classes
         for node in tree.body:
             if isinstance(node, ast.ClassDef):
                 cls_info = {
@@ -187,18 +240,27 @@ class CodeMap:
     def enclosing_symbol(self, file: str, line: int) -> Optional[Dict[str, Any]]:
         """Find the innermost function or class enclosing `line` in `file`."""
         self.build()
-        norm_file = str(Path(file).name)
-        # Find matching file entry
+        clean_query = file.replace("\\", "/").lstrip("./")
+        norm_file = Path(clean_query).name
+
         matched_info = None
-        for path_key, info in self.files.items():
-            if path_key == file or Path(path_key).name == norm_file or file.endswith(path_key):
-                matched_info = info
-                break
+        # Prefer exact relative path match first, then suffix match, then basename match
+        if clean_query in self.files:
+            matched_info = self.files[clean_query]
+        else:
+            for path_key, info in self.files.items():
+                if clean_query.endswith(path_key) or path_key.endswith(clean_query):
+                    matched_info = info
+                    break
+            if matched_info is None:
+                for path_key, info in self.files.items():
+                    if Path(path_key).name == norm_file:
+                        matched_info = info
+                        break
 
         if not matched_info:
             return None
 
-        # Check methods in classes first (innermost)
         for cls in matched_info["classes"]:
             for m in cls["methods"]:
                 if m["start_line"] <= line <= m["end_line"]:
@@ -221,7 +283,6 @@ class CodeMap:
                     "file": matched_info["path"],
                 }
 
-        # Check top-level functions
         for fn in matched_info["functions"]:
             if fn["start_line"] <= line <= fn["end_line"]:
                 return {
@@ -239,7 +300,6 @@ class CodeMap:
     def find_callers(self, symbol: str) -> List[Dict[str, Any]]:
         """Find all callers of symbol across the codebase."""
         self.build()
-        # Symbol could be 'func' or 'Class.func'
         target_name = symbol.split(".")[-1]
         return self.callers_index.get(target_name, [])
 
@@ -255,7 +315,8 @@ class CodeMap:
     def format_summary(self, max_chars: int = 2500) -> str:
         """Format compact outline of the repository for LLM context."""
         self.build()
-        lines = [f"Code Map (HEAD: {self.commit_hash[:8] if len(self.commit_hash) >= 8 else self.commit_hash}):"]
+        head_label = self.commit_hash[:8] if len(self.commit_hash) >= 8 else self.commit_hash
+        lines = [f"Code Map ({self.repo_dir.name}, HEAD: {head_label}):"]
         for rel_path, info in sorted(self.files.items()):
             lines.append(f"\n[{rel_path}]")
             if info["imports"]:
@@ -275,22 +336,34 @@ class CodeMap:
             out = out[:max_chars] + "\n... [code map truncated]"
         return out
 
-# Global singleton
-_global_codemap: Optional[CodeMap] = None
+
+# Per-workspace cache keyed by resolved path string
+_codemap_cache: Dict[str, CodeMap] = {}
+
 
 def get_codemap(repo_dir: Optional[Path] = None) -> CodeMap:
-    global _global_codemap
-    target = Path(repo_dir or DEMO_REPO_DIR).resolve()
-    if _global_codemap is None or _global_codemap.repo_dir != target:
-        _global_codemap = CodeMap(target)
-    _global_codemap.build()
-    return _global_codemap
+    """Retrieve or build cached CodeMap for the requested workspace."""
+    target = Path(repo_dir).expanduser().resolve() if repo_dir else resolve_repo_dir()
+    key = str(target)
+    cmap = _codemap_cache.get(key)
+    if cmap is None:
+        cmap = CodeMap(target)
+        _codemap_cache[key] = cmap
+    cmap.build()
+    return cmap
 
-def enclosing_symbol(file: str, line: int) -> Optional[Dict[str, Any]]:
-    return get_codemap().enclosing_symbol(file, line)
 
-def find_callers(symbol: str) -> List[Dict[str, Any]]:
-    return get_codemap().find_callers(symbol)
+# Alias matching cross-component convention
+get_code_map = get_codemap
 
-def find_callees(symbol: str) -> List[str]:
-    return get_codemap().find_callees(symbol)
+
+def enclosing_symbol(file: str, line: int, repo_dir: Optional[Path] = None) -> Optional[Dict[str, Any]]:
+    return get_codemap(repo_dir).enclosing_symbol(file, line)
+
+
+def find_callers(symbol: str, repo_dir: Optional[Path] = None) -> List[Dict[str, Any]]:
+    return get_codemap(repo_dir).find_callers(symbol)
+
+
+def find_callees(symbol: str, repo_dir: Optional[Path] = None) -> List[str]:
+    return get_codemap(repo_dir).find_callees(symbol)

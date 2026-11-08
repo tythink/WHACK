@@ -287,10 +287,40 @@ declare module "vscode" {
     id?: string;
   }
 
+  export interface OutputChannel extends Disposable {
+    readonly name: string;
+    append(value: string): void;
+    appendLine(value: string): void;
+    clear(): void;
+    show(preserveFocus?: boolean): void;
+    hide(): void;
+  }
+
   export interface WorkspaceFolder {
     readonly uri: Uri;
     readonly name: string;
     readonly index: number;
+  }
+
+  export class RelativePattern {
+    readonly baseUri: Uri;
+    readonly base: string;
+    readonly pattern: string;
+    constructor(base: WorkspaceFolder | Uri | string, pattern: string);
+  }
+
+  export interface FileSystemWatcher extends Disposable {
+    readonly ignoreCreateEvents: boolean;
+    readonly ignoreChangeEvents: boolean;
+    readonly ignoreDeleteEvents: boolean;
+    readonly onDidCreate: Event<Uri>;
+    readonly onDidChange: Event<Uri>;
+    readonly onDidDelete: Event<Uri>;
+  }
+
+  export interface TerminalShellExecution {
+    commandLine: { value: string };
+    read?: () => AsyncIterable<string>;
   }
 
   export interface Configuration {
@@ -312,6 +342,11 @@ declare module "vscode" {
   export interface TextEditorSelectionChangeEvent {
     readonly textEditor: TextEditor;
     readonly selections: readonly Selection[];
+  }
+
+  export interface WorkspaceFoldersChangeEvent {
+    readonly added: readonly WorkspaceFolder[];
+    readonly removed: readonly WorkspaceFolder[];
   }
 
   export interface ExtensionContext {
@@ -361,6 +396,19 @@ declare module "vscode" {
       message: string,
       ...items: T[]
     ): Thenable<T | undefined>;
+    export function showErrorMessage<T extends string>(
+      message: string,
+      ...items: T[]
+    ): Thenable<T | undefined>;
+    export function showInputBox(options?: {
+      title?: string;
+      prompt?: string;
+      placeHolder?: string;
+      password?: boolean;
+      value?: string;
+      ignoreFocusOut?: boolean;
+    }): Thenable<string | undefined>;
+    export function createOutputChannel(name: string): OutputChannel;
     export function showQuickPick<T extends QuickPickItem>(
       items: readonly T[],
       options?: { placeHolder?: string; title?: string }
@@ -368,12 +416,14 @@ declare module "vscode" {
     export const onDidChangeActiveTextEditor: Event<TextEditor | undefined>;
     export const onDidChangeVisibleTextEditors: Event<readonly TextEditor[]>;
     export const onDidChangeTextEditorSelection: Event<TextEditorSelectionChangeEvent>;
+    export const onDidStartTerminalShellExecution:
+      | Event<{
+          execution: TerminalShellExecution;
+        }>
+      | undefined;
     export const onDidEndTerminalShellExecution:
       | Event<{
-          execution: {
-            commandLine: { value: string };
-            read?: () => AsyncIterable<string>;
-          };
+          execution: TerminalShellExecution;
           exitCode: number | undefined;
         }>
       | undefined;
@@ -385,6 +435,17 @@ declare module "vscode" {
     export function openTextDocument(uriOrPath: Uri | string): Thenable<TextDocument>;
     export function applyEdit(edit: WorkspaceEdit): Thenable<boolean>;
     export function getConfiguration(section?: string): Configuration;
+    export function getWorkspaceFolder(uri: Uri): WorkspaceFolder | undefined;
+    export function asRelativePath(
+      pathOrUri: string | Uri,
+      includeWorkspaceFolder?: boolean
+    ): string;
+    export function createFileSystemWatcher(
+      globPattern: string | RelativePattern,
+      ignoreCreateEvents?: boolean,
+      ignoreChangeEvents?: boolean,
+      ignoreDeleteEvents?: boolean
+    ): FileSystemWatcher;
     export function registerTextDocumentContentProvider(
       scheme: string,
       provider: TextDocumentContentProvider
@@ -395,6 +456,7 @@ declare module "vscode" {
       maxResults?: number
     ): Thenable<Uri[]>;
     export const onDidChangeTextDocument: Event<TextDocumentChangeEvent>;
+    export const onDidChangeWorkspaceFolders: Event<WorkspaceFoldersChangeEvent>;
   }
 
   export namespace languages {

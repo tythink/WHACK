@@ -1,155 +1,183 @@
-"""Validation test suite for 8 developer stuck scenarios evaluated against realistic demo code."""
+"""End-to-end scenario tests through DiagnosticEngine (replacing removed _heuristic_diagnosis)."""
 
-import sys
+import asyncio
+import json
 from pathlib import Path
-
-from brain.config import DEMO_REPO_DIR
-
-# Add demo repository (generated path outside repo) to sys.path for direct module import
-if str(DEMO_REPO_DIR) not in sys.path:
-    sys.path.insert(0, str(DEMO_REPO_DIR))
+from types import SimpleNamespace
 
 import pytest
-import asyncio
-import subprocess
-import importlib
-from brain.models import DiagnoseRequest, EditorState, TerminalState
+
 from brain.agent import DiagnosticEngine
-import scenarios
+from brain.models import DiagnoseRequest, EditorState, TerminalState
 
 engine = DiagnosticEngine()
 
-def switch_branch(branch: str):
-    subprocess.run(
-        ["git", "checkout", branch],
-        cwd=str(DEMO_REPO_DIR),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
+
+@pytest.fixture
+def scenario_workspace(tmp_path: Path) -> Path:
+    ws = tmp_path / "scenarios_repo"
+    ws.mkdir()
+    (ws / "scenarios.py").write_text(
+        "def compute_throughput_rate(success_count: int, total_events: int) -> float:\n"
+        "    return (success_count / total_events) * 100.0\n\n"
+        "async def fetch_remote():\n"
+        "    return {'ok': True}\n\n"
+        "async def poll_remote_metrics():\n"
+        "    data = fetch_remote()\n"
+        "    return data['ok']\n\n"
+        "def append_audit_entry(entry: str, log: list = []):\n"
+        "    log.append(entry)\n"
+        "    return log\n",
+        encoding="utf-8",
     )
-    importlib.reload(scenarios)
+    return ws
 
-@pytest.fixture(autouse=True)
-def ensure_main_branch():
-    yield
-    switch_branch("main")
 
-def test_scenario_1_off_by_one():
-    switch_branch("scenario-1")
-    with pytest.raises(IndexError) as exc:
-        scenarios.calculate_window_slices()
-    
-    req = DiagnoseRequest(
-        hintLevel="hint",
-        editorState=EditorState(activeFile="utils.py", cursorLine=18),
-        terminalState=TerminalState(
-            command="python -m scenarios",
-            exitCode=1,
-            tailOutput=str(exc.value),
-        ),
-    )
-    diag = engine._heuristic_diagnosis(req, "hint")
-    assert diag.file == "utils.py"
-    assert diag.lines == (10, 15)
-    assert diag.uncertain is False
-    assert "Off-by-one" in diag.summary or "offset" in diag.summary.lower()
+def test_engine_has_no_heuristic_diagnosis():
+    """Confirm dummy/canned _heuristic_diagnosis was completely deleted."""
+    assert not hasattr(engine, "_heuristic_diagnosis")
 
-def test_scenario_3_none_dereference():
-    switch_branch("scenario-3")
-    with pytest.raises(TypeError) as exc:
-        scenarios.extract_event_timestamp()
 
-    req = DiagnoseRequest(
-        hintLevel="nudge",
-        editorState=EditorState(activeFile="scenarios.py"),
-        terminalState=TerminalState(
-            command="python -m scenarios",
-            exitCode=1,
-            tailOutput="TypeError: 'NoneType' object is not subscriptable",
-        ),
-    )
-    diag = engine._heuristic_diagnosis(req, "nudge")
-    assert diag.uncertain is False
-    assert "None" in diag.summary or "None" in diag.quip
+def test_scenario_zero_division_with_tool_call(
+    monkeypatch: pytest.MonkeyPatch, scenario_workspace: Path
+):
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-scenario-key")
 
-def test_scenario_6_zero_division():
-    switch_branch("scenario-6")
-    with pytest.raises(ZeroDivisionError) as exc:
-        scenarios.compute_throughput_rate()
+    turn = {"n": 0}
+
+    class FakeModels:
+        def generate_content(self, model, contents, config=None):
+            turn["n"] += 1
+            if turn["n"] == 1:
+                return SimpleNamespace(
+                    function_calls=[
+                        SimpleNamespace(
+                            name="read_file_range",
+                            args={"rel_path": "scenarios.py", "start_line": 1, "end_line": 5},
+                        )
+                    ],
+                    candidates=[],
+                )
+            return SimpleNamespace(
+                function_calls=[],
+                candidates=[
+                    SimpleNamespace(
+                        content=SimpleNamespace(
+                            parts=[
+                                SimpleNamespace(
+                                    thought=False,
+                                    text=json.dumps({
+                                        "summary": "ZeroDivisionError in compute_throughput_rate when total_events is 0",
+                                        "file": "scenarios.py",
+                                        "lines": [2, 2],
+                                        "quip": "Dividing by zero on the pass? Even an empty pot cannot divide itself!",
+                                        "uncertain": False,
+                                        "confidence": 0.96,
+                                        "hintLevel": "full_explanation",
+                                        "explanation": "Guard `total_events == 0` before dividing.",
+                                        "suggestedFix": {
+                                            "file": "scenarios.py",
+                                            "line": 2,
+                                            "oldText": "return (success_count / total_events) * 100.0",
+                                            "newText": "return (success_count / total_events) * 100.0 if total_events else 0.0",
+                                        },
+                                    }),
+                                )
+                            ]
+                        )
+                    )
+                ],
+            )
+
+    monkeypatch.setattr("google.genai.Client", lambda api_key: SimpleNamespace(models=FakeModels()))
 
     req = DiagnoseRequest(
         hintLevel="full_explanation",
+        repoPath=str(scenario_workspace),
+        captureScreenshot=False,
+        editorState=EditorState(activeFile="scenarios.py", cursorLine=2),
         terminalState=TerminalState(
-            command="python -m scenarios",
+            command="pytest",
             exitCode=1,
             tailOutput="ZeroDivisionError: division by zero",
         ),
     )
-    diag = engine._heuristic_diagnosis(req, "full_explanation")
-    assert diag.uncertain is False
-    assert "Zero" in diag.summary or "division by zero" in diag.explanation.lower()
 
-def test_scenario_5_unawaited():
-    switch_branch("scenario-5")
-    with pytest.raises(TypeError) as exc:
-        scenarios.poll_remote_metrics()
+    diag = asyncio.run(engine.diagnose(req))
+    assert diag.source == "model"
+    assert diag.file == "scenarios.py"
+    assert diag.lines == (2, 2)
+    assert diag.suggestedFix is not None
+    assert diag.suggestedFix.oldText == "    return (success_count / total_events) * 100.0"
+    assert diag.suggestedFix.newText == (
+        "    return (success_count / total_events) * 100.0 if total_events else 0.0"
+    )
+
+
+def test_scenario_prose_exhausted_turns_recovery(
+    monkeypatch: pytest.MonkeyPatch, scenario_workspace: Path
+):
+    """Even if the model returns plain markdown after tool inspection, extractor synthesizes cleanly."""
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-scenario-key")
+
+    prose = (
+        "In `scenarios.py:8`, `fetch_remote()` is an unawaited coroutine sitting cold on the counter!\n\n"
+        "```python\n"
+        "# Before\n"
+        "data = fetch_remote()\n\n"
+        "# After\n"
+        "data = await fetch_remote()\n"
+        "```"
+    )
+
+    class FakeModels:
+        def generate_content(self, model, contents, config=None):
+            return SimpleNamespace(
+                function_calls=[],
+                candidates=[
+                    SimpleNamespace(
+                        content=SimpleNamespace(parts=[SimpleNamespace(thought=False, text=prose)])
+                    )
+                ],
+            )
+
+    monkeypatch.setattr("google.genai.Client", lambda api_key: SimpleNamespace(models=FakeModels()))
 
     req = DiagnoseRequest(
         hintLevel="hint",
+        repoPath=str(scenario_workspace),
+        captureScreenshot=False,
         terminalState=TerminalState(
-            command="python -m scenarios",
-            exitCode=1,
-            tailOutput="TypeError: 'coroutine' object is not subscriptable\nRuntimeWarning: coroutine was never awaited",
+            tailOutput="TypeError: 'coroutine' object is not subscriptable",
         ),
     )
-    diag = engine._heuristic_diagnosis(req, "hint")
-    assert "coroutine" in diag.summary.lower() or "await" in diag.summary.lower()
+    diag = asyncio.run(engine.diagnose(req))
+    assert diag.source == "model"
+    assert diag.file == "scenarios.py"
+    assert diag.lines == (8, 8)
+    assert diag.suggestedFix is not None
+    assert diag.suggestedFix.oldText == "    data = fetch_remote()"
+    assert diag.suggestedFix.newText == "    data = await fetch_remote()"
 
-def test_scenario_7_regex():
-    switch_branch("scenario-7")
-    with pytest.raises(AttributeError) as exc:
-        scenarios.parse_status_code()
 
-    req = DiagnoseRequest(
-        hintLevel="hint",
-        terminalState=TerminalState(
-            command="python -m scenarios",
-            exitCode=1,
-            tailOutput="AttributeError: 'NoneType' object has no attribute 'group'",
-        ),
-    )
-    diag = engine._heuristic_diagnosis(req, "hint")
-    assert "regex" in diag.summary.lower() or "group" in diag.summary.lower()
-
-def test_scenario_8_type_mismatch():
-    switch_branch("scenario-8")
-    with pytest.raises(TypeError) as exc:
-        scenarios.check_priority_threshold()
-
-    req = DiagnoseRequest(
-        hintLevel="full_explanation",
-        terminalState=TerminalState(
-            command="python -m scenarios",
-            exitCode=1,
-            tailOutput="TypeError: '>' not supported between instances of 'str' and 'int'",
-        ),
-    )
-    diag = engine._heuristic_diagnosis(req, "full_explanation")
-    assert "type mismatch" in diag.summary.lower() or "string" in diag.summary.lower()
-
-def test_scenario_4_mutable_default():
-    switch_branch("scenario-4")
-    first = scenarios.append_audit_entry("first")
-    second = scenarios.append_audit_entry("second")
-    assert len(second) == 2  # State persisted across invocations
+def test_scenario_offline_honest_reporting(
+    monkeypatch: pytest.MonkeyPatch, scenario_workspace: Path
+):
+    for k in ("GEMINI_API_KEY", "GOOGLE_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
 
     req = DiagnoseRequest(
         hintLevel="nudge",
-        terminalState=TerminalState(
-            command="python -m scenarios",
-            exitCode=1,
-            tailOutput="AssertionError: mutable default argument persisted elements across calls",
-        ),
+        repoPath=str(scenario_workspace),
+        captureScreenshot=False,
+        terminalState=TerminalState(tailOutput="AssertionError: mutable default persisted"),
     )
-    diag = engine._heuristic_diagnosis(req, "nudge")
-    assert "mutable" in diag.summary.lower()
+    diag = asyncio.run(engine.diagnose(req))
+    assert diag.source == "offline"
+    assert diag.uncertain is True
+    assert diag.confidence == 0.0
+    assert diag.error is not None
+    assert diag.file is None

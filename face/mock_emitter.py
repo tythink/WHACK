@@ -1,4 +1,4 @@
-"""HTTP event emitter and Phase 1 mock heartbeat generator for WHACK Role 1."""
+"""Live HTTP telemetry emitter (`:3000/events`) and standalone test CLI for WHACK Role 1."""
 
 from __future__ import annotations
 
@@ -11,21 +11,26 @@ from typing import Any, Dict, Optional
 
 import requests
 
-DEFAULT_EVENTS_URL = "http://localhost:3000/events"
+DEFAULT_EVENTS_URL = "http://127.0.0.1:3000/events"
 
 
 class AsyncEventClient:
-    """Non-blocking background HTTP POST client for `/events` with throttling."""
+    """Non-blocking background HTTP POST telemetry client for `:3000/events` with throttling."""
 
     def __init__(
         self,
         endpoint: str = DEFAULT_EVENTS_URL,
-        heartbeat_sec: float = 3.0,
+        heartbeat_sec: float = 2.0,
+        enabled: bool = False,
+        *,
+        endpoint_url: Optional[str] = None,
     ) -> None:
-        self.endpoint = endpoint
-        self.heartbeat_sec = heartbeat_sec
-        self.enabled: bool = False
-        self.last_status: str = "Disabled"
+        resolved_url = endpoint_url if endpoint_url is not None else endpoint
+        self.endpoint = resolved_url
+        self.endpoint_url = resolved_url
+        self.heartbeat_sec = float(heartbeat_sec)
+        self.enabled: bool = bool(enabled)
+        self.last_status: str = "Ready (POST :3000 ON)" if self.enabled else "Disabled"
         self._last_sent_at: float = 0.0
         self._last_state: Optional[str] = None
         self._last_zone: Optional[str] = None
@@ -38,8 +43,9 @@ class AsyncEventClient:
         if not self.enabled:
             return
         now = time.monotonic()
-        state = f"{payload.get('state')}:{payload.get('primary_emotion')}"
-        zone = payload.get("gaze", {}).get("zone")
+        state = f"{payload.get('state')}:{payload.get('primary_emotion')}:{payload.get('user_status', '')}"
+        gaze_obj = payload.get("gaze")
+        zone = gaze_obj.get("zone") if isinstance(gaze_obj, dict) else None
         state_changed = (state != self._last_state) or (zone != self._last_zone)
         due_heartbeat = (now - self._last_sent_at) >= self.heartbeat_sec
 
@@ -129,14 +135,14 @@ def build_mock_event(cycle_idx: int = 0) -> Dict[str, Any]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="WHACK Role 1 Mock Face Event Emitter")
+    parser = argparse.ArgumentParser(description="WHACK Role 1 Face Telemetry Event Emitter")
     parser.add_argument("--url", default=DEFAULT_EVENTS_URL, help="Core /events endpoint")
     parser.add_argument("--interval", type=float, default=10.0, help="Seconds between POSTs")
     parser.add_argument("--once", action="store_true", help="Emit one event and exit")
     args = parser.parse_args()
 
     idx = 0
-    print(f"[face/mock_emitter] Streaming mock face events to {args.url} every {args.interval}s ...")
+    print(f"[face/mock_emitter] Streaming sample face events to {args.url} every {args.interval}s ...")
     while True:
         payload = build_mock_event(idx)
         idx += 1

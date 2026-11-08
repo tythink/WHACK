@@ -2,9 +2,9 @@
  * WHACK — Shared Event & API Contracts (Single Source of Truth)
  * Owned by: Role 4 — Frontend & Integration Lead (@frontend-core)
  *
- * Every module (Face, Signals, Brain, Core Server, Electron HUD) uses
- * these exact JSON shapes to communicate over HTTP (localhost:3000)
- * and WebSocket (ws://localhost:3000/ws).
+ * Every module (Face, Signals, Brain, Core Server, Electron HUD, VS Code Extension)
+ * uses these exact JSON shapes to communicate over HTTP (127.0.0.1:3000)
+ * and WebSocket (ws://127.0.0.1:3000/ws).
  */
 
 export type EventSource = "face" | "editor" | "terminal" | "hotkey" | "brain";
@@ -13,7 +13,7 @@ export type HintLevel = "nudge" | "hint" | "full_explanation";
 
 /**
  * 1. THE ENVELOPE (`BaseEvent`)
- * Every HTTP POST to `http://localhost:3000/events` wraps its data in this object.
+ * Every HTTP POST to `http://127.0.0.1:3000/events` wraps its data in this object.
  */
 export interface BaseEvent<T = unknown> {
   source: EventSource;
@@ -33,14 +33,15 @@ export interface FacePayload {
 }
 
 /**
- * 3. EDITOR SENSOR PAYLOAD (Sent by Role 2: @signals-lead)
- * Emitted by the VS Code extension when editing, undoing, or dwelling.
+ * 3. EDITOR SENSOR PAYLOAD (Sent by Role 2 / VS Code Extension)
  */
 export interface EditorPayload {
+  workspaceRoot?: string;
   activeFile: string;
   isUndo: boolean;
   isRedo: boolean;
   diagnosticsCount: number;
+  diagnosticsSummary?: string;
   cursorDwellMs: number;
   topDiagnostics?: string[];
   cursorLine?: number;
@@ -49,7 +50,7 @@ export interface EditorPayload {
 }
 
 /**
- * 4. TERMINAL SENSOR PAYLOAD (Sent by Role 2: @signals-lead)
+ * 4. TERMINAL SENSOR PAYLOAD (Sent by Role 2 / VS Code Extension)
  * Emitted when a terminal command finishes running.
  */
 export interface TerminalPayload {
@@ -74,6 +75,8 @@ export interface HotkeyPayload {
 export interface DiagnosisRequest {
   triggerType: "hotkey" | "auto_nudge";
   hintLevel: HintLevel;
+  repoPath?: string;
+  captureScreenshot?: boolean;
   fusionReasons?: string[];
   attemptLog?: string | BaseEvent[];
   lastKnownGoodDiff?: string;
@@ -111,17 +114,21 @@ export interface SuggestedFix {
  * 7. BRAIN DIAGNOSIS RESPONSE (Returned by Role 3 -> Core Server -> VS Code / Electron UI)
  */
 export interface DiagnosisResponse {
+  diagnosisId?: string;
   summary: string;
   file?: string;
   lines?: [number, number];
   quip: string;
   uncertain: boolean;
   hintLevel: HintLevel;
+  source?: "model" | "offline";
+  error?: string;
+  repoPath?: string;
   reasons?: string[];
   confidence?: number;
   explanation?: string;
   citations?: CodeCitation[];
-  suggestedFix?: SuggestedFix;
+  suggestedFix?: SuggestedFix | null;
 }
 
 export interface ChatMessage {
@@ -137,13 +144,15 @@ export interface ChatRequest {
   highlightedLines?: [number, number];
   codeSnippet?: string;
   latestDiagnosis?: Partial<DiagnosisResponse> | null;
+  repoPath?: string;
 }
 
 export interface ChatResponse {
   reply: string;
-  mode?: "brain_live" | "mock_fallback";
+  mode?: "brain_live" | "offline" | "mock_fallback";
+  error?: string;
   citations?: CodeCitation[];
-  suggestedFix?: SuggestedFix;
+  suggestedFix?: SuggestedFix | null;
 }
 
 /**
@@ -157,7 +166,7 @@ export interface FeedbackPayload {
 }
 
 /**
- * 9. WEBSOCKET MESSAGES (`ws://localhost:3000/ws` -> Electron / VS Code UI)
+ * 9. WEBSOCKET MESSAGES (`ws://127.0.0.1:3000/ws` -> Electron / VS Code UI)
  */
 export type WsMessage =
   | {

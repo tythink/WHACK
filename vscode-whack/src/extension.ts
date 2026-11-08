@@ -17,15 +17,15 @@ import {
 } from "./fixEngine";
 import { WhackHighlightManager } from "./highlightManager";
 import { ChimeKind, WhackRightSidePanel } from "./rightSidePanel";
-import { ScenarioId, buildSimulatedDiagnosis } from "./simulatorScenarios";
+import { WhackServiceManager } from "./serviceManager";
 import { WhackTelemetryWatcher } from "./telemetryWatcher";
 
 let brainBridge: WhackBrainBridge | null = null;
+let serviceManager: WhackServiceManager | null = null;
 
 /**
  * Plays a lightweight, non-blocking OS audio chime on Windows/macOS so the user
- * hears the notification even before clicking inside the Webview (where Chromium
- * autoplay policy can otherwise defer WebAudio).
+ * hears live diagnosis notifications even before clicking inside the Webview.
  */
 function playNativeOsChime(kind: ChimeKind): void {
   if (process.env.WHACK_TEST_MODE === "1") {
@@ -64,56 +64,85 @@ export async function activate(
   const config = vscode.workspace.getConfiguration("whack");
   const coreUrl = config.get<string>("coreServerUrl", "http://127.0.0.1:3000");
   const brainUrl = config.get<string>("brainServerUrl", "http://127.0.0.1:5002");
-  const showSimBtn = config.get<boolean>("showSimulateStatusBarButton", true);
-  let enableToast = config.get<boolean>("enableNotificationToast", true);
+  const enableToast = config.get<boolean>("enableNotificationToast", true);
   let enableSound = config.get<boolean>("enableNotificationSound", true);
 
   const workspaceRoots = (vscode.workspace.workspaceFolders ?? []).map(
     (f) => f.uri.fsPath
   );
 
-  // 1. Passive Status Bar Pill (stays tiny & quiet while you code!)
+  // 1. Passive Status Bar Pill (click opens the WHACK Chef's Pass & Mission Control panel)
   const statusPill = vscode.window.createStatusBarItem(
     vscode.StatusBarAlignment.Right,
     102
   );
-  statusPill.name = "WHACK Passive Status";
-  statusPill.command = "whack.statusMenu";
-  statusPill.text = "$(pulse) WHACK · Flow 0.08";
+  statusPill.name = "WHACK Live Status";
+  statusPill.command = "whack.togglePanel";
+  statusPill.text = "$(flame) WHACK · Ready";
   statusPill.tooltip =
-    "WHACK is passively monitoring. Click for options or press Ctrl+Shift+K to diagnose.";
+    "Click to open WHACK Chef's Pass & 1-Click Live Stack Control (or press Ctrl+Shift+K to diagnose)";
   statusPill.show();
 
-  // 2. One-click "Simulate Brain" Status Bar test button (for testing before Role 3 Brain is ready)
-  const simulatePill = vscode.window.createStatusBarItem(
-    vscode.StatusBarAlignment.Right,
-    101
-  );
-  simulatePill.name = "WHACK Simulate Brain";
-  simulatePill.command = "whack.simulateBrain";
-  simulatePill.text = "$(beaker) Simulate Brain";
-  simulatePill.tooltip =
-    "Test WHACK Brain trigger: plays chime + notification toast, highlights target lines, and opens the right-side Diagnosis + Chat panel (Ctrl+Alt+S)";
-  if (showSimBtn) {
-    simulatePill.show();
-  }
-
-  // 3. Diff Provider + Highlight Manager + Right-Side Panel
+  // 2. Diff Provider + Highlight Manager + Service Manager
   const diffProvider = new WhackDiffContentProvider();
-  const highlightManager = new WhackHighlightManager(context.extensionPath);
+  const highlightManager = new WhackHighlightManager();
 
   let activeDiagnosis: DiagnosisResponse | null = null;
   let activePatch: ComputedPatch | undefined;
   let chatHistory: ChatMessage[] = [];
 
+  const seenDiagnosisTimestamps = new Map<string, number>();
+
+  const isDuplicateDiagnosis = (diag: DiagnosisResponse): boolean => {
+    const now = Date.now();
+    for (const [k, ts] of seenDiagnosisTimestamps.entries()) {
+      const ttl = k.startsWith("id:") ? 10000 : 5000;
+      if (now - ts > ttl) {
+        seenDiagnosisTimestamps.delete(k);
+      }
+    }
+
+    const idKey = diag.diagnosisId ? `id:${diag.diagnosisId}` : null;
+    const hashKey = `hash:${diag.source}|${diag.file ?? ""}|${
+      diag.lines?.[0] ?? 0
+    }-${diag.lines?.[1] ?? 0}|${diag.summary.trim()}`;
+
+    if ((idKey && seenDiagnosisTimestamps.has(idKey)) || seenDiagnosisTimestamps.has(hashKey)) {
+      return true;
+    }
+
+    if (idKey) {
+      seenDiagnosisTimestamps.set(idKey, now);
+    }
+    seenDiagnosisTimestamps.set(hashKey, now);
+    return false;
+  };
+
   const updateStatusBar = (snap: PassiveStatusSnapshot): void => {
     const scoreStr = snap.confusionScore.toFixed(2);
-    const brainTag = snap.brainOnline ? "Brain:Live" : "Brain:Mock";
+    const stack = serviceManager?.getState();
+    const brainTag = snap.brainOnline
+      ? snap.apiKeyConfigured === false
+        ? "Brain Needs API Key"
+        : `Live AI (${snap.brainModel || "gemini-2.5-flash"})`
+      : "Brain Offline";
 
-    if (activeDiagnosis) {
+    rightPanel.updateLiveTelemetry(snap, stack);
+
+    if (snap.askingBrain) {
+      statusPill.text = "$(sync~spin) WHACK · Asking Chef...";
+      statusPill.backgroundColor = new vscode.ThemeColor(
+        "statusBarItem.warningBackground"
+      );
+    } else if (activeDiagnosis?.source === "offline") {
+      statusPill.text = "$(warning) WHACK · Launch Stack";
+      statusPill.backgroundColor = new vscode.ThemeColor(
+        "statusBarItem.warningBackground"
+      );
+    } else if (activeDiagnosis) {
       const shortFile = activeDiagnosis.file
         ? path.basename(activeDiagnosis.file)
-        : "code";
+        : "workspace";
       const lineStr = activeDiagnosis.lines
         ? `:${activeDiagnosis.lines[0]}`
         : "";
@@ -125,8 +154,11 @@ export async function activate(
           ? "statusBarItem.warningBackground"
           : "statusBarItem.errorBackground"
       );
+    } else if (!snap.brainOnline) {
+      statusPill.text = "$(rocket) WHACK · Click to Start";
+      statusPill.backgroundColor = undefined;
     } else if (snap.cooldownUntil && snap.cooldownUntil > Date.now()) {
-      statusPill.text = `$(bell-slash) WHACK · Snoozed`;
+      statusPill.text = "$(bell-slash) WHACK · Snoozed";
       statusPill.backgroundColor = undefined;
     } else if (snap.faceState === "confused" || snap.confusionScore >= 0.7) {
       statusPill.text = `$(flame) WHACK · Stuck ${scoreStr}`;
@@ -144,33 +176,91 @@ export async function activate(
     }
 
     statusPill.tooltip =
-      `WHACK Passive Monitor (${brainTag} | Core:${snap.coreMode} | Sound:${
+      `WHACK (${brainTag} | Sensor:${snap.sensorActive ? "LIVE" : "Standby"} | Sound:${
         enableSound ? "ON" : "OFF"
-      })\n` +
-      `Click for WHACK Quick Menu · Ctrl+Shift+K to Diagnose · Ctrl+Alt+S to Simulate`;
+      })\nClick to open WHACK Chef's Pass & Live Stack Controls · Press Ctrl+Shift+K to Diagnose`;
   };
 
-  /**
-   * Fires a native VS Code interactive Notification Toast (`showInformationMessage` / `showWarningMessage`)
-   * with direct action buttons (`✓ Apply Fix`, `⇄ Preview Diff`, `↗ Jump to Line`, `✕ Dismiss`).
-   */
   const fireBrainNotificationToast = (
     diagnosis: DiagnosisResponse,
     hasFix: boolean
   ): void => {
     if (!enableToast) return;
 
+    if (diagnosis.source === "offline") {
+      const errText = diagnosis.error || "";
+      const isMissingKey = /missing.*api key|configure.*api_key/i.test(errText);
+      const isConnRefused = /econnrefused|fetch failed|unable to connect|offline/i.test(
+        errText
+      ) && !/timed out/i.test(errText);
+
+      const promptMsg = isMissingKey
+        ? `WHACK Brain needs an LLM API key (${errText}).`
+        : isConnRefused
+        ? `WHACK Brain (:5002) is not running yet. Click 🚀 Launch Live Stack to start it!`
+        : `WHACK Brain request error: ${errText || diagnosis.summary}`;
+
+      const buttons = isMissingKey
+        ? ["🔑 Set API Key", "Open Panel"]
+        : isConnRefused
+        ? ["🚀 Launch Live Stack", "Open Panel"]
+        : ["↻ Retry Diagnose", "🚀 Launch Live Stack", "Open Panel"];
+
+      vscode.window
+        .showWarningMessage(promptMsg, ...buttons)
+        .then(
+          async (selected: string | undefined) => {
+            if (selected === "🚀 Launch Live Stack") {
+              await vscode.commands.executeCommand("whack.startLiveStack");
+            } else if (selected === "🔑 Set API Key") {
+              await vscode.commands.executeCommand("whack.configureApiKey");
+            } else if (selected === "↻ Retry Diagnose") {
+              await vscode.commands.executeCommand("whack.triggerDiagnose");
+            } else if (selected === "Open Panel") {
+              rightPanel.reveal();
+            }
+          },
+          () => undefined
+        );
+      return;
+    }
+
     const confPct = Math.round((diagnosis.confidence ?? 0.95) * 100);
-    const shortFile = diagnosis.file ? path.basename(diagnosis.file) : "code";
+    const shortFile = diagnosis.file
+      ? path.basename(diagnosis.file)
+      : "workspace";
     const lineRange = diagnosis.lines
       ? `:${diagnosis.lines[0]}–${diagnosis.lines[1]}`
       : "";
     const cleanSummary = diagnosis.summary.replace(/`/g, "");
-    const message = `⚡ WHACK Brain (${confPct}% · ${shortFile}${lineRange}): ${cleanSummary}`;
 
-    const actions = hasFix
-      ? ["✓ Apply Fix", "⇄ Preview Diff", "↗ Jump to Line", "✕ Dismiss"]
-      : ["↗ Jump to Line", "💬 Ask in Chat", "✕ Dismiss"];
+    const diagReasonsLower = (diagnosis.reasons ?? []).join(" ").toLowerCase();
+    const diagTextLower = `${diagReasonsLower} ${cleanSummary} ${diagnosis.quip || ""}`.toLowerCase();
+    const isBreakReminder =
+      diagReasonsLower.includes("fatig") ||
+      diagReasonsLower.includes("tired") ||
+      diagTextLower.includes("take a break") ||
+      diagTextLower.includes("minute break") ||
+      diagTextLower.includes("step off the line");
+
+    const message = isBreakReminder
+      ? `☕ WHACK Chef's Break Order: ${cleanSummary}`
+      : `🔥 WHACK (${confPct}% · ${shortFile}${lineRange}): ${cleanSummary}`;
+
+    const hasJumpTarget = Boolean(
+      diagnosis.citations?.length || (diagnosis.file && diagnosis.lines)
+    );
+    const actions: string[] = [];
+    if (isBreakReminder) {
+      actions.push("☕ Take 5m Break");
+    }
+    if (hasFix) {
+      actions.push("✓ Apply Fix", "⇄ Preview Diff");
+    }
+    if (hasJumpTarget) {
+      actions.push("↗ Jump to Line");
+    }
+    actions.push("💬 Ask in Chat", "✕ Dismiss");
 
     const notifyPromise = diagnosis.uncertain
       ? vscode.window.showWarningMessage(message, ...actions)
@@ -179,7 +269,9 @@ export async function activate(
     notifyPromise.then(
       async (selected: string | undefined) => {
         if (!selected) return;
-        if (selected === "✓ Apply Fix") {
+        if (selected === "☕ Take 5m Break") {
+          await vscode.commands.executeCommand("whack.takeBreak");
+        } else if (selected === "✓ Apply Fix") {
           await vscode.commands.executeCommand("whack.applyFix");
         } else if (selected === "⇄ Preview Diff") {
           await vscode.commands.executeCommand("whack.previewDiff");
@@ -190,7 +282,10 @@ export async function activate(
               ? { file: diagnosis.file, lines: diagnosis.lines }
               : undefined);
           if (primaryCit) {
-            await highlightManager.jumpToCitation(primaryCit);
+            await highlightManager.jumpToCitation(
+              primaryCit,
+              diagnosis.repoPath
+            );
           }
         } else if (selected === "💬 Ask in Chat") {
           await vscode.commands.executeCommand("whack.focusChat");
@@ -202,25 +297,27 @@ export async function activate(
     );
   };
 
-  /**
-   * Central handler invoked whenever Brain returns a result (real LLM or Simulator):
-   * 1. Computes applicable patch (if any)
-   * 2. Opens target file on left (`ViewColumn.One`), scrolls to `lines`, and highlights lines + citations
-   * 3. Slides open the Right-Side Panel (`ViewColumn.Beside`) with diagnosis & follow-up chatbox
-   * 4. Plays notification chime (WebAudio + OS chime) + shows interactive VS Code notification toast
-   */
   const presentBrainDiagnosis = async (
     diagnosis: DiagnosisResponse,
     sourceLabel: string,
     resetChat = true
   ): Promise<void> => {
-    activeDiagnosis = diagnosis;
-    activePatch = await computeSuggestedPatch(diagnosis, context.extensionPath);
+    if (resetChat && isDuplicateDiagnosis(diagnosis)) {
+      return;
+    }
 
-    await highlightManager.showDiagnosisHighlights(
-      diagnosis,
-      Boolean(activePatch)
-    );
+    const isOffline = diagnosis.source === "offline";
+    activeDiagnosis = diagnosis;
+    activePatch = isOffline ? undefined : await computeSuggestedPatch(diagnosis);
+
+    if (isOffline) {
+      highlightManager.clearHighlights();
+    } else {
+      await highlightManager.showDiagnosisHighlights(
+        diagnosis,
+        Boolean(activePatch)
+      );
+    }
 
     if (resetChat) {
       chatHistory = [];
@@ -228,10 +325,10 @@ export async function activate(
 
     rightPanel.showDiagnosis(diagnosis, {
       sourceLabel,
-      brainOnline: Boolean(brainBridge?.status.brainOnline),
+      brainOnline: !isOffline && Boolean(brainBridge?.status.brainOnline),
       hasFix: Boolean(activePatch),
       resetChat,
-      playSound: resetChat && enableSound,
+      playSound: resetChat && enableSound && !isOffline,
     });
 
     if (brainBridge) {
@@ -239,7 +336,7 @@ export async function activate(
     }
 
     if (resetChat) {
-      if (enableSound) {
+      if (enableSound && !isOffline) {
         playNativeOsChime(diagnosis.uncertain ? "uncertain" : "diagnosis");
       }
       fireBrainNotificationToast(diagnosis, Boolean(activePatch));
@@ -258,10 +355,7 @@ export async function activate(
       if (!activeDiagnosis) return;
       if (activeDiagnosis.tierVariants?.[level]) {
         activeDiagnosis = { ...activeDiagnosis, hintLevel: level };
-        activePatch = await computeSuggestedPatch(
-          activeDiagnosis,
-          context.extensionPath
-        );
+        activePatch = await computeSuggestedPatch(activeDiagnosis);
         rightPanel.showDiagnosis(activeDiagnosis, {
           sourceLabel: "Tier Switch",
           brainOnline: Boolean(brainBridge?.status.brainOnline),
@@ -273,57 +367,58 @@ export async function activate(
       }
 
       if (brainBridge) {
+        statusPill.text = "$(sync~spin) WHACK · Asking Chef...";
         const refreshed = await brainBridge.requestDiagnosis(
           level,
-          telemetry.getActiveEditorContext()
+          telemetry.getActiveEditorContext(true)
         );
+        updateStatusBar(brainBridge.status);
         await presentBrainDiagnosis(refreshed, "Brain Tier Refresh", false);
       }
     },
 
     onJumpToCitation: async (citation: CodeCitation) => {
-      await highlightManager.jumpToCitation(citation);
+      await highlightManager.jumpToCitation(citation, activeDiagnosis?.repoPath);
     },
 
     onPreviewDiff: async () => {
-      if (!activeDiagnosis) return;
-      activePatch = await computeSuggestedPatch(
-        activeDiagnosis,
-        context.extensionPath
-      );
-      if (!activePatch) {
-        vscode.window.showInformationMessage(
-          "No structured code replacement block was found in this diagnosis."
-        );
-        return;
-      }
-
-      const fileName = path.basename(activePatch.uri.fsPath);
-      const proposedUri = vscode.Uri.parse(
-        `${DIFF_SCHEME}://proposed/${encodeURIComponent(fileName)}?ts=${Date.now()}`
-      );
-      diffProvider.setContent(proposedUri, activePatch.previewFullDocument);
-
-      await vscode.commands.executeCommand(
-        "vscode.diff",
-        activePatch.uri,
-        proposedUri,
-        `${fileName}: Current ↔ WHACK Proposed Fix (${activePatch.summaryLabel})`,
-        { viewColumn: vscode.ViewColumn.One, preserveFocus: false }
-      );
+      await vscode.commands.executeCommand("whack.previewDiff");
     },
 
     onApplyFix: async () => {
       await vscode.commands.executeCommand("whack.applyFix");
     },
 
+    onTriggerDiagnose: async () => {
+      await vscode.commands.executeCommand("whack.triggerDiagnose");
+    },
+
+    onStartStack: async () => {
+      await vscode.commands.executeCommand("whack.startLiveStack");
+    },
+
+    onStopStack: async () => {
+      await vscode.commands.executeCommand("whack.stopLiveStack");
+    },
+
+    onToggleSensorHud: async () => {
+      await vscode.commands.executeCommand("whack.toggleSensorHud");
+    },
+
+    onConfigureApiKey: async () => {
+      await vscode.commands.executeCommand("whack.configureApiKey");
+    },
+
+    onShowLogs: () => {
+      serviceManager?.showLogs();
+    },
+
     onDismiss: async () => {
       await vscode.commands.executeCommand("whack.dismiss");
     },
 
-    onSimulateScenario: async (scenario: ScenarioId) => {
-      const simDiag = buildSimulatedDiagnosis(scenario, context.extensionPath);
-      await presentBrainDiagnosis(simDiag, `Simulated (${scenario})`, true);
+    onTakeBreak: async () => {
+      await vscode.commands.executeCommand("whack.takeBreak");
     },
 
     onSendChatMessage: async (text: string) => {
@@ -337,21 +432,76 @@ export async function activate(
       rightPanel.setChatThinking(true);
 
       const hl = highlightManager.getHighlightedSnippet();
+      const editorCtx = telemetry.getActiveEditorContext(false);
       const res = brainBridge
         ? await brainBridge.sendChatMessage({
             message: text,
             history: chatHistory,
-            activeFile: hl.file || activeDiagnosis?.file,
+            activeFile:
+              hl.file || activeDiagnosis?.file || editorCtx.activeFile,
             highlightedLines: hl.lines || activeDiagnosis?.lines,
-            codeSnippet: hl.snippet,
+            codeSnippet: hl.snippet || editorCtx.selectionText || undefined,
             latestDiagnosis: activeDiagnosis,
+            repoPath:
+              activeDiagnosis?.repoPath ||
+              editorCtx.workspaceRoot ||
+              workspaceRoots[0],
           })
         : {
-            reply: "Brain bridge initializing...",
-            mode: "mock_fallback" as const,
+            reply:
+              "Brain server (:5002) is offline — click **🚀 Launch Live Stack** above to chat live!",
+            mode: "offline" as const,
           };
 
       rightPanel.setChatThinking(false);
+
+      if (res.suggestedFix) {
+        const baseDiag: DiagnosisResponse = activeDiagnosis
+          ? {
+              ...activeDiagnosis,
+              source: res.mode === "brain_live" ? "model" : activeDiagnosis.source,
+              file: res.suggestedFix.file || activeDiagnosis.file || editorCtx.activeFile,
+              lines: res.suggestedFix.lines || activeDiagnosis.lines,
+              citations: res.citations?.length
+                ? res.citations
+                : activeDiagnosis.citations,
+              suggestedFix: res.suggestedFix,
+              repoPath:
+                activeDiagnosis.repoPath ||
+                editorCtx.workspaceRoot ||
+                workspaceRoots[0],
+            }
+          : {
+              summary: "Suggested fix from WHACK Brain chat.",
+              file: res.suggestedFix.file || editorCtx.activeFile,
+              lines: res.suggestedFix.lines,
+              quip: "Check the diff before serving it!",
+              uncertain: false,
+              confidence: 0.9,
+              hintLevel: "full_explanation",
+              source: "model",
+              repoPath: editorCtx.workspaceRoot || workspaceRoots[0],
+              citations: res.citations,
+              suggestedFix: res.suggestedFix,
+            };
+
+        activeDiagnosis = baseDiag;
+        activePatch = await computeSuggestedPatch(activeDiagnosis);
+        await highlightManager.showDiagnosisHighlights(
+          activeDiagnosis,
+          Boolean(activePatch)
+        );
+        rightPanel.updateDiagnosisInPlace(activeDiagnosis, {
+          brainOnline: res.mode === "brain_live",
+          hasFix: Boolean(activePatch),
+        });
+        if (brainBridge) {
+          updateStatusBar(brainBridge.status);
+        }
+      } else {
+        rightPanel.setBrainOnline(res.mode === "brain_live");
+      }
+
       const assistantMsg: ChatMessage = {
         role: "assistant",
         content: res.reply,
@@ -365,7 +515,24 @@ export async function activate(
 
   rightPanel.setSoundEnabled(enableSound);
 
-  // 4. Start Brain & Core Bridge + Passive Editor/Terminal Telemetry
+  // 3. Service Manager + Brain & Core Bridge + Telemetry
+  serviceManager = new WhackServiceManager(
+    context.extensionPath,
+    workspaceRoots,
+    brainUrl,
+    {
+      onStateChanged: (st) => {
+        rightPanel.updateStackState(st);
+        if (brainBridge) {
+          brainBridge.refreshHealth().then(() => {
+            if (brainBridge) updateStatusBar(brainBridge.status);
+          });
+        }
+      },
+    }
+  );
+  rightPanel.updateStackState(serviceManager.getState());
+
   brainBridge = new WhackBrainBridge(
     coreUrl,
     brainUrl,
@@ -379,43 +546,66 @@ export async function activate(
     }
   );
   const telemetry = new WhackTelemetryWatcher(brainBridge);
-  brainBridge.start().catch(() => undefined);
+  brainBridge.setContextProvider(() => telemetry.getActiveEditorContext(false));
+  brainBridge.start().then(() => {
+    if (brainBridge) updateStatusBar(brainBridge.status);
+  });
 
-  // 5. Register VS Code Commands
+  // 4. Register VS Code Commands
   context.subscriptions.push(
     statusPill,
-    simulatePill,
     diffProvider,
     highlightManager,
     rightPanel,
+    serviceManager,
     telemetry,
     vscode.workspace.registerTextDocumentContentProvider(
       DIFF_SCHEME,
       diffProvider
     ),
 
-    vscode.commands.registerCommand("whack.simulateBrain", async () => {
-      const sim = buildSimulatedDiagnosis(
-        "sliding_window",
-        context.extensionPath
-      );
-      await presentBrainDiagnosis(sim, "Simulated Brain", true);
+    vscode.commands.registerCommand("whack.startLiveStack", async () => {
+      rightPanel.reveal();
+      await serviceManager?.startFullStack();
+      await brainBridge?.refreshHealth();
+      if (activeDiagnosis?.source === "offline" && brainBridge?.status.brainOnline) {
+        activeDiagnosis = null;
+        rightPanel.clearDiagnosisCard();
+      }
+      if (brainBridge) updateStatusBar(brainBridge.status);
     }),
 
-    vscode.commands.registerCommand("whack.simulateActiveFile", async () => {
-      const sim = buildSimulatedDiagnosis(
-        "active_editor",
-        context.extensionPath
-      );
-      await presentBrainDiagnosis(sim, "Active File Simulation", true);
+    vscode.commands.registerCommand("whack.stopLiveStack", async () => {
+      await serviceManager?.stopFullStack();
+      await brainBridge?.refreshHealth();
+      if (brainBridge) updateStatusBar(brainBridge.status);
+    }),
+
+    vscode.commands.registerCommand("whack.toggleSensorHud", async () => {
+      await serviceManager?.toggleSensorHud();
+      if (brainBridge) updateStatusBar(brainBridge.status);
+    }),
+
+    vscode.commands.registerCommand("whack.configureApiKey", async () => {
+      rightPanel.reveal();
+      await serviceManager?.configureApiKey();
+      await brainBridge?.refreshHealth();
+      if (activeDiagnosis?.source === "offline" && brainBridge?.status.apiKeyConfigured) {
+        activeDiagnosis = null;
+        rightPanel.clearDiagnosisCard();
+      }
+      if (brainBridge) updateStatusBar(brainBridge.status);
     }),
 
     vscode.commands.registerCommand("whack.triggerDiagnose", async () => {
       if (!brainBridge) return;
-      statusPill.text = "$(sync~spin) WHACK · Diagnosing...";
+      statusPill.text = "$(sync~spin) WHACK · Asking Chef...";
+      statusPill.backgroundColor = new vscode.ThemeColor(
+        "statusBarItem.warningBackground"
+      );
       const diag = await brainBridge.requestDiagnosis(
         "hint",
-        telemetry.getActiveEditorContext()
+        telemetry.getActiveEditorContext(true)
       );
       updateStatusBar(brainBridge.status);
       await presentBrainDiagnosis(diag, "Manual Trigger (Ctrl+Shift+K)", true);
@@ -423,6 +613,9 @@ export async function activate(
 
     vscode.commands.registerCommand("whack.togglePanel", () => {
       rightPanel.toggle();
+      if (brainBridge) {
+        rightPanel.updateLiveTelemetry(brainBridge.status, serviceManager?.getState());
+      }
     }),
 
     vscode.commands.registerCommand("whack.toggleSound", () => {
@@ -441,42 +634,34 @@ export async function activate(
     }),
 
     vscode.commands.registerCommand("whack.previewDiff", async () => {
-      await vscode.commands.executeCommand("whack.focusPanelInternalPreview");
-    }),
-
-    vscode.commands.registerCommand(
-      "whack.focusPanelInternalPreview",
-      async () => {
-        if (!activeDiagnosis) return;
-        activePatch = await computeSuggestedPatch(
-          activeDiagnosis,
-          context.extensionPath
+      if (!activeDiagnosis) return;
+      activePatch = await computeSuggestedPatch(activeDiagnosis);
+      if (!activePatch) {
+        vscode.window.showInformationMessage(
+          "No verified code replacement block is available for this diagnosis."
         );
-        if (!activePatch) return;
-        const fileName = path.basename(activePatch.uri.fsPath);
-        const proposedUri = vscode.Uri.parse(
-          `${DIFF_SCHEME}://proposed/${encodeURIComponent(fileName)}?ts=${Date.now()}`
-        );
-        diffProvider.setContent(proposedUri, activePatch.previewFullDocument);
-        await vscode.commands.executeCommand(
-          "vscode.diff",
-          activePatch.uri,
-          proposedUri,
-          `${fileName}: Current ↔ WHACK Proposed Fix`,
-          { viewColumn: vscode.ViewColumn.One, preserveFocus: false }
-        );
+        return;
       }
-    ),
+      const fileName = path.basename(activePatch.uri.fsPath);
+      const proposedUri = vscode.Uri.parse(
+        `${DIFF_SCHEME}://proposed/${encodeURIComponent(fileName)}?ts=${Date.now()}`
+      );
+      diffProvider.setContent(proposedUri, activePatch.previewFullDocument);
+      await vscode.commands.executeCommand(
+        "vscode.diff",
+        activePatch.uri,
+        proposedUri,
+        `${fileName}: Current ↔ WHACK Proposed Fix (${activePatch.summaryLabel})`,
+        { viewColumn: vscode.ViewColumn.One, preserveFocus: false }
+      );
+    }),
 
     vscode.commands.registerCommand("whack.applyFix", async () => {
       if (!activeDiagnosis) return;
-      activePatch = await computeSuggestedPatch(
-        activeDiagnosis,
-        context.extensionPath
-      );
+      activePatch = await computeSuggestedPatch(activeDiagnosis);
       if (!activePatch) {
         vscode.window.showWarningMessage(
-          "No automatic patch available for this hint—ask in the WHACK chatbox for a snippet!"
+          "No verified automatic patch is available for this diagnosis — ask in the WHACK chatbox for a fix!"
         );
         return;
       }
@@ -497,6 +682,7 @@ export async function activate(
             activePatch.uri.fsPath
           )}\`. Press \`Ctrl+Z\` in the editor anytime to undo, or run \`pytest\` to verify!`,
           timestamp: Date.now(),
+          mode: "brain_live",
         });
         brainBridge?.applyLocalFeedback("helpful");
       }
@@ -506,7 +692,7 @@ export async function activate(
       "whack.jumpToCitation",
       async (cit?: CodeCitation) => {
         if (cit) {
-          await highlightManager.jumpToCitation(cit);
+          await highlightManager.jumpToCitation(cit, activeDiagnosis?.repoPath);
         }
       }
     ),
@@ -517,63 +703,76 @@ export async function activate(
 
     vscode.commands.registerCommand("whack.dismiss", () => {
       highlightManager.clearHighlights();
-      rightPanel.close();
       activeDiagnosis = null;
       activePatch = undefined;
+      rightPanel.clearDiagnosisCard();
       brainBridge?.applyLocalFeedback("dismiss");
+      if (brainBridge) updateStatusBar(brainBridge.status);
+    }),
+
+    vscode.commands.registerCommand("whack.takeBreak", () => {
+      highlightManager.clearHighlights();
+      activeDiagnosis = null;
+      activePatch = undefined;
+      rightPanel.clearDiagnosisCard();
+      brainBridge?.applyLocalFeedback("break");
+      if (brainBridge) updateStatusBar(brainBridge.status);
+      vscode.window.showInformationMessage(
+        "☕ Chef's orders: Enjoy your 5-minute break! WHACK proactive triggers are paused for 5 minutes."
+      );
     }),
 
     vscode.commands.registerCommand("whack.statusMenu", async () => {
       const picked = await vscode.window.showQuickPick(
         [
           {
-            label: "$(beaker) Simulate Brain Result (Planted Bug in utils.py)",
-            description: "Plays chime + toast, highlights L18–21 & L29–30, opens right-side panel",
-            id: "sim_bug",
+            label: "$(rocket) Launch Full Live Stack (Brain :5002 + Camera Sensor)",
+            description: "Starts Brain server & live camera/OS fusion sensor in 1 click",
+            id: "start",
           },
           {
-            label: "$(sparkle) Simulate Brain Result on Currently Open File",
-            description: "Highlights lines around your current cursor",
-            id: "sim_active",
+            label: "$(key) Set Gemini / OpenAI / Anthropic API Key",
+            description: "Saves your API key locally to brain/.env",
+            id: "key",
           },
           {
-            label: "$(pulse) Trigger Live / Fallback Diagnosis (Ctrl+Shift+K)",
-            description: "Calls Brain :5002 if online, else Mock Brain",
-            id: "diag",
-          },
-          {
-            label: `$(bell) Toggle Notification Sound (Currently ${
-              enableSound ? "ON" : "OFF"
-            })`,
-            description: "Two-note harmonic chime when Brain returns a result",
-            id: "sound",
-          },
-          {
-            label: "$(layout-sidebar-right) Toggle Right-Side Diagnosis & Chat Panel",
+            label: "$(layout-sidebar-right) Open WHACK Chef's Pass Panel",
+            description: "Open the right-side Mission Control, Diagnosis & Chat panel",
             id: "toggle",
           },
           {
-            label: "$(close) Dismiss Highlights & Snooze 3m",
+            label: "$(pulse) Trigger Live Brain Diagnosis Now (Ctrl+Shift+K)",
+            description: "Sends active workspace, diagnostics & screenshot to Brain (:5002)",
+            id: "diag",
+          },
+          {
+            label: "$(debug-stop) Stop Live Stack",
+            description: "Stops background Brain server and Sensor HUD",
+            id: "stop",
+          },
+          {
+            label: "$(close) Clear Highlights & Snooze 3m",
+            description: "Clear active editor highlights and pause proactive triggers for 3 minutes",
             id: "dismiss",
           },
         ],
         {
-          title: "WHACK — Passive Confusion & Brain Assistant",
-          placeHolder: "Choose an action to test or control WHACK",
+          title: "WHACK — Live Multimodal Chef's Pass",
+          placeHolder: "Choose an action",
         }
       );
 
       if (!picked) return;
-      if (picked.id === "sim_bug") {
-        await vscode.commands.executeCommand("whack.simulateBrain");
-      } else if (picked.id === "sim_active") {
-        await vscode.commands.executeCommand("whack.simulateActiveFile");
+      if (picked.id === "start") {
+        await vscode.commands.executeCommand("whack.startLiveStack");
+      } else if (picked.id === "key") {
+        await vscode.commands.executeCommand("whack.configureApiKey");
+      } else if (picked.id === "toggle") {
+        rightPanel.reveal();
       } else if (picked.id === "diag") {
         await vscode.commands.executeCommand("whack.triggerDiagnose");
-      } else if (picked.id === "sound") {
-        await vscode.commands.executeCommand("whack.toggleSound");
-      } else if (picked.id === "toggle") {
-        await vscode.commands.executeCommand("whack.togglePanel");
+      } else if (picked.id === "stop") {
+        await vscode.commands.executeCommand("whack.stopLiveStack");
       } else if (picked.id === "dismiss") {
         await vscode.commands.executeCommand("whack.dismiss");
       }
@@ -582,6 +781,8 @@ export async function activate(
 }
 
 export function deactivate(): void {
+  serviceManager?.dispose();
+  serviceManager = null;
   brainBridge?.dispose();
   brainBridge = null;
 }

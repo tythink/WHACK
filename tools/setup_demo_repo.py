@@ -14,6 +14,11 @@ from pathlib import Path
 
 # Base paths
 WORKSPACE_ROOT = Path(__file__).resolve().parent.parent
+if str(WORKSPACE_ROOT) not in sys.path:
+    sys.path.insert(0, str(WORKSPACE_ROOT))
+
+from tools import install_git_hooks
+
 STAGES_DIR = (WORKSPACE_ROOT / "demo-repo-stages").resolve()
 DEFAULT_TARGET_DIR = Path(os.path.expanduser("~/whack-demo-repo")).resolve()
 
@@ -106,7 +111,7 @@ def copy_stage_files(stage_path: Path, target_dir: Path):
         else:
             shutil.copy(item, dest)
 
-def build_repo(target_dir: Path) -> Path:
+def build_repo(target_dir: Path, sync_hook: bool = False) -> Path:
     target_dir = target_dir.resolve()
     print(f"🔨 Rebuilding demo-repo at: {target_dir}")
 
@@ -153,6 +158,20 @@ def build_repo(target_dir: Path) -> Path:
 
     # 5. Return to main
     run_git(["checkout", "main"], cwd=target_dir)
+
+    # 6. Install WHACK post-commit hook and generate initial .whack/WIKI.md
+    hook_res = install_git_hooks.install_post_commit_hook(
+        target_dir,
+        sync=sync_hook,
+        initial_update=True,
+        allow_model=False,
+    )
+    if hook_res.get("ok"):
+        wiki_info = hook_res.get("wiki") or {}
+        print(f"  ✓ Installed WHACK post-commit hook & generated wiki: {wiki_info.get('wikiPath', target_dir / '.whack' / 'WIKI.md')}")
+    else:
+        print(f"  ⚠ Warning: hook installation skipped: {hook_res.get('error')}")
+
     print(f"\n✓ Repository built successfully at {target_dir} with all 8 scenario branches.")
     return target_dir
 
@@ -164,9 +183,14 @@ def main():
         default=os.environ.get("WHACK_DEMO_REPO") or os.environ.get("DEMO_REPO_DIR") or str(DEFAULT_TARGET_DIR),
         help=f"Target directory for repo (default: {DEFAULT_TARGET_DIR})",
     )
+    parser.add_argument(
+        "--sync-hook",
+        action="store_true",
+        help="Configure the installed post-commit hook to run synchronously by default.",
+    )
     args = parser.parse_args()
     target_path = Path(args.target).expanduser().resolve()
-    build_repo(target_path)
+    build_repo(target_path, sync_hook=args.sync_hook)
 
 if __name__ == "__main__":
     main()

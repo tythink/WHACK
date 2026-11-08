@@ -1,21 +1,16 @@
 "use strict";
 /**
  * ============================================================================
- * PLUG-AND-PLAY BRAIN & CORE ADAPTER (`brainAdapter.ts`)
+ * LIVE BRAIN & CORE ADAPTER (`brainAdapter.ts`)
  * ============================================================================
- * This is the SINGLE file connecting the VS Code Mode UI to:
- *   1. Role 3's Brain LLM Server (`http://127.0.0.1:5002/diagnose` & `/chat`)
+ * Connects the VS Code Mode Extension directly to:
+ *   1. Role 3's Brain LLM Server (`http://127.0.0.1:5002/diagnose`, `/chat`, `/wiki/update`)
  *   2. Role 4's Core Event/WS Server (`http://127.0.0.1:3000` & `ws://127.0.0.1:3000/ws`)
- *   3. Role 1+2's Face & Signals streams (`POST :3000/events` & `signals/latest_brain_call.json`)
+ *   3. Role 1+2's Face & Signals streams (`POST :3000/events`, `GET :3000/context`,
+ *      & `signals/latest_brain_call.json`)
  *
- * Today (before Brain is finished):
- *   - Automatically runs an embedded `:3000` receiver if Core isn't running externally.
- *   - Uses a built-in Mock Brain fallback for `/diagnose` and right-side `/chat`.
- *
- * When your teammate finishes Brain (`:5002`):
- *   - Zero UI changes needed! As soon as `:5002` responds or broadcasts a `"brain"`
- *     diagnosis event to `:3000/events`, `normalizeBrainDiagnosis()` adapts it and
- *     triggers editor line highlighting + the right-side panel automatically.
+ * Zero Mock Brain / simulator fallbacks: when `:5002` is offline or missing an API key,
+ * reports honest `source: "offline"` status without fabricating files, lines, or diffs.
  * ============================================================================
  */
 var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
@@ -57,106 +52,191 @@ exports.normalizeBrainDiagnosis = normalizeBrainDiagnosis;
 const crypto = __importStar(require("crypto"));
 const fs = __importStar(require("fs"));
 const http = __importStar(require("http"));
+const os = __importStar(require("os"));
 const path = __importStar(require("path"));
-const simulatorScenarios_1 = require("./simulatorScenarios");
+const BRAIN_HTTP_TIMEOUT_MS = 50000;
+function parseCitations(rawCitations, fallbackFile, fallbackLines) {
+    if (!Array.isArray(rawCitations))
+        return [];
+    return rawCitations
+        .map((c) => {
+        if (!c || typeof c !== "object")
+            return null;
+        const obj = c;
+        const cFile = obj.file || obj.file_path || fallbackFile;
+        if (typeof cFile !== "string" || !cFile.trim())
+            return null;
+        let cLines;
+        if (Array.isArray(obj.lines) && obj.lines.length >= 2) {
+            const s = Number(obj.lines[0]) || 1;
+            const e = Number(obj.lines[1]) || s;
+            cLines = [s, Math.max(s, e)];
+        }
+        else if (typeof obj.line === "number") {
+            cLines = [obj.line, obj.line];
+        }
+        else if (fallbackLines) {
+            cLines = fallbackLines;
+        }
+        if (!cLines)
+            return null;
+        return {
+            file: cFile,
+            lines: cLines,
+            snippet: typeof obj.snippet === "string" ? obj.snippet : undefined,
+            note: typeof obj.note === "string"
+                ? obj.note
+                : typeof obj.message === "string"
+                    ? obj.message
+                    : undefined,
+            replacement: typeof obj.replacement === "string" ? obj.replacement : undefined,
+        };
+    })
+        .filter((x) => x !== null);
+}
+function parseSuggestedFix(rawFix, fallbackFile, fallbackLines) {
+    if (!rawFix || typeof rawFix !== "object")
+        return undefined;
+    const fixObj = rawFix;
+    const rep = typeof fixObj.newText === "string"
+        ? fixObj.newText
+        : typeof fixObj.new_text === "string"
+            ? fixObj.new_text
+            : typeof fixObj.replacement === "string"
+                ? fixObj.replacement
+                : undefined;
+    if (typeof rep !== "string")
+        return undefined;
+    const fStart = fixObj.startLine ?? fixObj.start_line;
+    const fEnd = fixObj.endLine ?? fixObj.end_line ?? fStart;
+    const fixLines = Array.isArray(fixObj.lines) && fixObj.lines.length >= 2
+        ? [Number(fixObj.lines[0]) || 1, Number(fixObj.lines[1]) || 1]
+        : typeof fStart === "number"
+            ? [Number(fStart) || 1, Number(fEnd) || Number(fStart) || 1]
+            : fallbackLines;
+    const findStr = typeof fixObj.oldText === "string"
+        ? fixObj.oldText
+        : typeof fixObj.old_text === "string"
+            ? fixObj.old_text
+            : typeof fixObj.find === "string"
+                ? fixObj.find
+                : undefined;
+    const fileStr = typeof fixObj.file === "string" && fixObj.file.trim()
+        ? fixObj.file
+        : fallbackFile;
+    return {
+        file: fileStr,
+        lines: fixLines,
+        startLine: fixLines?.[0],
+        endLine: fixLines?.[1],
+        find: findStr,
+        oldText: findStr,
+        replacement: rep,
+        newText: rep,
+    };
+}
 /**
- * Adapts ANY reasonable JSON shape returned by Role 3's Brain LLM into our strict `DiagnosisResponse`.
- * If your teammate renames fields later (e.g. `file_path`, `line_range`, `locations`), map them right here!
+ * Adapts Role 3's Brain JSON response into our strict `DiagnosisResponse`.
+ * Preserves `source: "offline"` honestly without inventing fake citations or patches.
  */
 function normalizeBrainDiagnosis(rawInput) {
     const raw = (rawInput && typeof rawInput === "object" ? rawInput : {});
-    const file = raw.file || raw.file_path || raw.filepath || raw.targetFile || undefined;
-    let lines;
-    const rawLines = raw.lines || raw.line_range || raw.lineRange;
-    if (Array.isArray(rawLines) && rawLines.length >= 2) {
-        lines = [Number(rawLines[0]) || 1, Number(rawLines[1]) || Number(rawLines[0]) || 1];
-    }
-    else if (typeof raw.start_line === "number") {
-        lines = [raw.start_line, Number(raw.end_line ?? raw.start_line)];
-    }
-    else if (typeof raw.line === "number") {
-        lines = [raw.line, raw.line];
-    }
-    const rawCitations = raw.citations || raw.locations || raw.places_to_correct || [];
-    const citations = Array.isArray(rawCitations)
-        ? rawCitations
-            .map((c) => {
-            if (!c || typeof c !== "object")
-                return null;
-            const cFile = c.file || c.file_path || file || "utils.py";
-            const cLines = Array.isArray(c.lines) && c.lines.length >= 2
-                ? [Number(c.lines[0]) || 1, Number(c.lines[1]) || 1]
-                : typeof c.line === "number"
-                    ? [c.line, c.line]
-                    : lines || [1, 1];
-            return {
-                file: String(cFile),
-                lines: cLines,
-                snippet: typeof c.snippet === "string" ? c.snippet : undefined,
-                note: typeof c.note === "string"
-                    ? c.note
-                    : typeof c.message === "string"
-                        ? c.message
-                        : undefined,
-                replacement: typeof c.replacement === "string" ? c.replacement : undefined,
-            };
-        })
-            .filter((x) => x !== null)
-        : [];
-    if (citations.length === 0 && file && lines) {
-        citations.push({
-            file,
-            lines,
-            note: typeof raw.summary === "string" ? raw.summary : "Identified target lines",
-        });
-    }
-    let suggestedFix;
-    const rawFix = raw.suggestedFix || raw.suggested_fix || raw.structuredEdit || raw.fix;
-    if (rawFix && typeof rawFix === "object") {
-        const rep = typeof rawFix.replacement === "string"
-            ? rawFix.replacement
-            : typeof rawFix.newText === "string"
-                ? rawFix.newText
-                : typeof rawFix.new_text === "string"
-                    ? rawFix.new_text
-                    : undefined;
-        if (typeof rep === "string") {
-            const fStart = rawFix.startLine ?? rawFix.start_line;
-            const fEnd = rawFix.endLine ?? rawFix.end_line ?? fStart;
-            const fixLines = Array.isArray(rawFix.lines)
-                ? [Number(rawFix.lines[0]), Number(rawFix.lines[1])]
-                : typeof fStart === "number"
-                    ? [Number(fStart), Number(fEnd)]
-                    : lines;
-            const findStr = typeof rawFix.find === "string"
-                ? rawFix.find
-                : typeof rawFix.oldText === "string"
-                    ? rawFix.oldText
-                    : typeof rawFix.old_text === "string"
-                        ? rawFix.old_text
-                        : undefined;
-            suggestedFix = {
-                file: rawFix.file || file,
-                lines: fixLines,
-                startLine: fixLines?.[0],
-                endLine: fixLines?.[1],
-                find: findStr,
-                oldText: findStr,
-                replacement: rep,
-                newText: rep,
-            };
-        }
-    }
-    else if (typeof raw.replacement === "string") {
-        suggestedFix = { file, lines, replacement: raw.replacement };
-    }
     const rawLevel = raw.hintLevel || raw.hint_level;
     const hintLevel = rawLevel === "nudge" || rawLevel === "hint" || rawLevel === "full_explanation"
         ? rawLevel
         : rawLevel === "full"
             ? "full_explanation"
             : "hint";
+    const source = raw.source === "offline"
+        ? "offline"
+        : raw.source === "model"
+            ? "model"
+            : raw.error
+                ? "offline"
+                : "model";
+    const diagnosisId = typeof raw.diagnosisId === "string"
+        ? raw.diagnosisId
+        : typeof raw.diagnosis_id === "string"
+            ? raw.diagnosis_id
+            : undefined;
+    const errorStr = typeof raw.error === "string" && raw.error.trim() ? raw.error : undefined;
+    const repoPath = typeof raw.repoPath === "string" && raw.repoPath.trim()
+        ? raw.repoPath
+        : typeof raw.repo_path === "string" && raw.repo_path.trim()
+            ? raw.repo_path
+            : undefined;
+    const reasons = Array.isArray(raw.reasons)
+        ? raw.reasons.map(String).filter((r) => r.trim().length > 0)
+        : undefined;
+    // Honest offline response: never attach fake file highlights or fake suggested fixes
+    if (source === "offline") {
+        return {
+            diagnosisId,
+            summary: typeof raw.summary === "string" && raw.summary.trim()
+                ? raw.summary
+                : "WHACK Brain (:5002) is offline.",
+            file: undefined,
+            lines: undefined,
+            quip: typeof raw.quip === "string" && raw.quip.trim()
+                ? raw.quip
+                : "Start brain.server on port 5002 so I can actually see what you're cooking.",
+            uncertain: true,
+            confidence: typeof raw.confidence === "number" ? raw.confidence : 0,
+            hintLevel,
+            source: "offline",
+            error: errorStr,
+            repoPath,
+            reasons,
+            explanation: typeof raw.explanation === "string" && raw.explanation.trim()
+                ? raw.explanation
+                : errorStr,
+            citations: [],
+            suggestedFix: null,
+        };
+    }
+    const fileCandidate = raw.file || raw.file_path || raw.filepath || raw.targetFile || undefined;
+    const file = typeof fileCandidate === "string" && fileCandidate.trim()
+        ? fileCandidate.trim()
+        : undefined;
+    let lines;
+    const rawLines = raw.lines || raw.line_range || raw.lineRange;
+    if (Array.isArray(rawLines) && rawLines.length >= 2) {
+        const s = Number(rawLines[0]) || 1;
+        const e = Number(rawLines[1]) || s;
+        lines = [s, Math.max(s, e)];
+    }
+    else if (typeof raw.start_line === "number") {
+        const s = Number(raw.start_line) || 1;
+        const e = Number(raw.end_line ?? s) || s;
+        lines = [s, Math.max(s, e)];
+    }
+    else if (typeof raw.line === "number") {
+        lines = [raw.line, raw.line];
+    }
+    const citations = parseCitations(raw.citations || raw.locations || raw.places_to_correct, file, lines);
+    if (citations.length === 0 && file && lines) {
+        citations.push({
+            file,
+            lines,
+            note: typeof raw.summary === "string" && raw.summary.trim()
+                ? raw.summary
+                : "Identified target lines",
+        });
+    }
+    const rawFix = raw.suggestedFix || raw.suggested_fix || raw.structuredEdit || raw.fix;
+    let suggestedFix = parseSuggestedFix(rawFix, file, lines);
+    if (!suggestedFix && typeof raw.replacement === "string" && file && lines) {
+        suggestedFix = {
+            file,
+            lines,
+            startLine: lines[0],
+            endLine: lines[1],
+            replacement: raw.replacement,
+            newText: raw.replacement,
+        };
+    }
     return {
+        diagnosisId,
         summary: typeof raw.summary === "string" && raw.summary.trim()
             ? raw.summary
             : "WHACK Brain identified a code region to inspect.",
@@ -167,17 +247,19 @@ function normalizeBrainDiagnosis(rawInput) {
             : "Computers do what you say, not what you want.",
         uncertain: Boolean(raw.uncertain),
         hintLevel,
-        reasons: Array.isArray(raw.reasons) ? raw.reasons.map(String) : undefined,
+        source: "model",
+        error: errorStr,
+        repoPath,
+        reasons,
         confidence: typeof raw.confidence === "number" ? raw.confidence : 0.95,
         explanation: typeof raw.explanation === "string" ? raw.explanation : undefined,
         citations,
-        suggestedFix,
+        suggestedFix: suggestedFix ?? null,
         tierVariants: raw.tierVariants,
     };
 }
 /**
- * Zero-dependency RFC-6455 WebSocket client using Node's built-in `http`/`net`/`crypto`
- * so the extension works out-of-the-box without requiring native `node_modules`.
+ * Zero-dependency RFC-6455 WebSocket client using Node's built-in `http`/`net`/`crypto`.
  */
 class LightweightWsClient {
     wsUrl;
@@ -275,7 +357,6 @@ class LightweightWsClient {
             }
             this.rxBuffer = this.rxBuffer.subarray(offset + maskLen + payloadLen);
             if (opcode === 0x1) {
-                // Text frame
                 try {
                     const parsed = JSON.parse(payload.toString("utf8"));
                     this.onMessage(parsed);
@@ -285,7 +366,6 @@ class LightweightWsClient {
                 }
             }
             else if (opcode === 0x9 && this.socket) {
-                // Ping -> Masked Pong
                 const mask = crypto.randomBytes(4);
                 const pong = Buffer.alloc(6);
                 pong[0] = 0x8a;
@@ -330,8 +410,15 @@ class WhackBrainBridge {
     embeddedServer = null;
     embeddedWsSockets = new Set();
     healthTimer = null;
-    outboxWatcher = null;
-    lastOutboxTimestamp = 0;
+    outboxWatchers = [];
+    outboxDebounceTimer = null;
+    seenOutboxStates = new Set();
+    lastOutboxCallId = 0;
+    lastOutboxMtimeMs = 0;
+    pendingNudgeTimer = null;
+    lastExternalNudgeCallAt = 0;
+    contextProvider = null;
+    cachedExternalContext = {};
     disposed = false;
     status = {
         faceState: "calm",
@@ -340,6 +427,7 @@ class WhackBrainBridge {
         cameraPaused: false,
         userStatusLabel: "Flow",
         brainOnline: false,
+        askingBrain: false,
         coreMode: "offline",
     };
     constructor(coreUrl, brainUrl, extensionPath, workspaceRoots, callbacks) {
@@ -348,6 +436,9 @@ class WhackBrainBridge {
         this.extensionPath = extensionPath;
         this.workspaceRoots = workspaceRoots;
         this.callbacks = callbacks;
+    }
+    setContextProvider(provider) {
+        this.contextProvider = provider;
     }
     async start() {
         await this.checkBrainHealth();
@@ -360,21 +451,57 @@ class WhackBrainBridge {
         }
         this.watchSignalsOutbox();
         this.healthTimer = setInterval(() => {
+            if (this.status.sensorActive &&
+                this.status.lastSensorSeenAt &&
+                Date.now() - this.status.lastSensorSeenAt > 7000) {
+                this.status.sensorActive = false;
+                this.callbacks.onStatusUpdate({ ...this.status });
+            }
             this.checkBrainHealth().catch(() => undefined);
-        }, 8000);
+        }, 5000);
         this.healthTimer.unref?.();
+    }
+    async refreshHealth() {
+        return this.checkBrainHealth();
     }
     async checkBrainHealth() {
         try {
             const controller = new AbortController();
-            const timer = setTimeout(() => controller.abort(), 1200);
+            const timer = setTimeout(() => controller.abort(), 2000);
             const res = await fetch(`${this.brainUrl.replace(/\/$/, "")}/health`, {
                 signal: controller.signal,
             });
             clearTimeout(timer);
             const online = res.ok;
-            if (online !== this.status.brainOnline) {
-                this.status.brainOnline = online;
+            let apiKeyConfigured = this.status.apiKeyConfigured;
+            let brainProvider = this.status.brainProvider;
+            let brainModel = this.status.brainModel;
+            if (online) {
+                try {
+                    const data = await res.json();
+                    if (typeof data?.apiKeyConfigured === "boolean") {
+                        apiKeyConfigured = data.apiKeyConfigured;
+                    }
+                    if (typeof data?.provider === "string") {
+                        brainProvider = data.provider;
+                    }
+                    if (typeof data?.model === "string") {
+                        brainModel = data.model;
+                    }
+                }
+                catch {
+                    // Ignore malformed health body
+                }
+            }
+            const changed = online !== this.status.brainOnline ||
+                apiKeyConfigured !== this.status.apiKeyConfigured ||
+                brainProvider !== this.status.brainProvider ||
+                brainModel !== this.status.brainModel;
+            this.status.brainOnline = online;
+            this.status.apiKeyConfigured = apiKeyConfigured;
+            this.status.brainProvider = brainProvider;
+            this.status.brainModel = brainModel;
+            if (changed) {
                 this.callbacks.onStatusUpdate({ ...this.status });
             }
             return online;
@@ -388,7 +515,6 @@ class WhackBrainBridge {
         }
     }
     async connectOrStartCore() {
-        // 1. Check if external Core Server (`npm start` in `core/`) is already running on :3000
         try {
             const controller = new AbortController();
             const timer = setTimeout(() => controller.abort(), 900);
@@ -400,11 +526,14 @@ class WhackBrainBridge {
                 this.status.coreMode = "external";
                 this.callbacks.onStatusUpdate({ ...this.status });
                 this.connectExternalWs();
+                if (this.contextProvider) {
+                    this.pushExternalContext(this.contextProvider());
+                }
                 return;
             }
         }
         catch {
-            // External Core Server not running -> start embedded :3000 receiver inside VS Code!
+            // External Core Server not running -> start embedded :3000 receiver inside VS Code
         }
         await this.startEmbeddedCoreReceiver();
     }
@@ -412,9 +541,15 @@ class WhackBrainBridge {
         const wsUrl = this.coreUrl.replace(/^http/, "ws") + "/ws";
         this.wsClient?.close();
         this.wsClient = new LightweightWsClient(wsUrl, (msg) => this.handleIncomingCoreMessage(msg), () => {
-            // Disconnected from external Core
+            // Reconnects automatically via LightweightWsClient
         });
         this.wsClient.connect();
+    }
+    clearPendingNudgeTimer() {
+        if (this.pendingNudgeTimer) {
+            clearTimeout(this.pendingNudgeTimer);
+            this.pendingNudgeTimer = null;
+        }
     }
     handleIncomingCoreMessage(msg) {
         if (!msg || typeof msg !== "object")
@@ -433,8 +568,12 @@ class WhackBrainBridge {
             this.callbacks.onStatusUpdate({ ...this.status });
         }
         else if (msg.type === "diagnosis_done" && msg.diagnosis) {
+            this.clearPendingNudgeTimer();
+            const normalized = normalizeBrainDiagnosis(msg.diagnosis);
+            this.status.askingBrain = false;
+            this.status.brainOnline = normalized.source === "model";
+            this.callbacks.onStatusUpdate({ ...this.status });
             if (!this.isInCooldown()) {
-                const normalized = normalizeBrainDiagnosis(msg.diagnosis);
                 this.callbacks.onDiagnosisTriggered(normalized, "Brain Stream");
             }
         }
@@ -443,12 +582,75 @@ class WhackBrainBridge {
             this.status.confusionScore = Math.max(this.status.confusionScore, Number(msg.score ?? 0.82));
             this.status.userStatusLabel = "Stuck";
             this.callbacks.onStatusUpdate({ ...this.status });
+            // When connected as WS client to an external Core server and a standalone `nudge`
+            // arrives without an in-flight Brain call or subsequent `diagnosis_done`, trigger cleanly once.
+            if (this.status.coreMode === "external" &&
+                !this.isInCooldown() &&
+                !this.status.askingBrain &&
+                !this.pendingNudgeTimer &&
+                Date.now() - this.lastExternalNudgeCallAt > 15000) {
+                const nudgeReasons = Array.isArray(msg.reasons)
+                    ? msg.reasons.map(String)
+                    : undefined;
+                this.pendingNudgeTimer = setTimeout(() => {
+                    this.pendingNudgeTimer = null;
+                    if (this.disposed ||
+                        this.isInCooldown() ||
+                        this.status.askingBrain) {
+                        return;
+                    }
+                    this.lastExternalNudgeCallAt = Date.now();
+                    this.status.askingBrain = true;
+                    this.callbacks.onStatusUpdate({ ...this.status });
+                    const ctx = this.contextProvider ? this.contextProvider() : {};
+                    this.requestDiagnosis("hint", ctx, { reasons: nudgeReasons })
+                        .then((diag) => {
+                        this.status.askingBrain = false;
+                        this.callbacks.onStatusUpdate({ ...this.status });
+                        if (!this.isInCooldown()) {
+                            this.callbacks.onDiagnosisTriggered(diag, "Core Fusion Nudge");
+                        }
+                    })
+                        .catch(() => {
+                        this.status.askingBrain = false;
+                        this.callbacks.onStatusUpdate({ ...this.status });
+                    });
+                }, 1200);
+                this.pendingNudgeTimer.unref?.();
+            }
         }
     }
+    buildContextPayload() {
+        const live = this.contextProvider
+            ? this.contextProvider()
+            : this.cachedExternalContext;
+        const defaultRoot = this.workspaceRoots[0]?.replace(/\\/g, "/") ?? null;
+        const workspaceRoot = live.workspaceRoot || defaultRoot;
+        return {
+            ok: true,
+            workspaceRoot,
+            cooldownUntil: this.isInCooldown() ? this.status.cooldownUntil : null,
+            cameraPaused: Boolean(this.status.cameraPaused),
+            editorState: {
+                activeFile: live.activeFile ?? "",
+                cursorLine: live.cursorLine ?? 1,
+                cursorColumn: live.cursorColumn ?? 1,
+                selectionText: live.selectionText ?? "",
+                diagnosticsCount: live.diagnosticsCount ?? 0,
+                diagnosticsSummary: live.diagnosticsSummary ?? "",
+            },
+            terminalState: live.terminalCommand !== undefined
+                ? {
+                    command: live.terminalCommand,
+                    exitCode: live.terminalExitCode ?? 0,
+                    durationMs: live.terminalDurationMs ?? 0,
+                    tailOutput: live.terminalTail ?? "",
+                }
+                : null,
+        };
+    }
     /**
-     * Embedded lightweight `:3000` receiver so `face/prototype_gui.py`, `signals/`,
-     * and Role 3's `brain/server.py` (`broadcast_to_core`) work directly with VS Code
-     * even if the user didn't start `core/` in a separate terminal!
+     * Embedded `:3000` HTTP + WS server serving `/health`, `/context`, `/events`, `/diagnose`, `/feedback`.
      */
     async startEmbeddedCoreReceiver() {
         let parsedPort = 3000;
@@ -463,8 +665,8 @@ class WhackBrainBridge {
             res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
             res.setHeader("Access-Control-Allow-Headers", "Content-Type");
             if (req.method === "OPTIONS") {
-                res.writeHead(200);
-                res.end("{}");
+                res.writeHead(200, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: true }));
                 return;
             }
             const url = new URL(req.url || "/", "http://127.0.0.1");
@@ -475,9 +677,14 @@ class WhackBrainBridge {
                     service: "whack-vscode-embedded-core",
                     faceState: this.status.faceState,
                     confusionScore: this.status.confusionScore,
-                    cooldownUntil: this.status.cooldownUntil,
+                    cooldownUntil: this.isInCooldown() ? this.status.cooldownUntil : null,
                     cameraPaused: this.status.cameraPaused,
                 }));
+                return;
+            }
+            if (req.method === "GET" && url.pathname === "/context") {
+                res.writeHead(200, { "Content-Type": "application/json" });
+                res.end(JSON.stringify(this.buildContextPayload()));
                 return;
             }
             const chunks = [];
@@ -493,29 +700,94 @@ class WhackBrainBridge {
                     res.end(JSON.stringify({ ok: false, error: "Invalid JSON" }));
                     return;
                 }
+                if (req.method === "POST" && url.pathname === "/context") {
+                    if (body && typeof body === "object") {
+                        this.cachedExternalContext = {
+                            ...this.cachedExternalContext,
+                            workspaceRoot: typeof body.workspaceRoot === "string"
+                                ? body.workspaceRoot
+                                : this.cachedExternalContext.workspaceRoot,
+                            activeFile: body.editorState?.activeFile ?? this.cachedExternalContext.activeFile,
+                            cursorLine: body.editorState?.cursorLine ?? this.cachedExternalContext.cursorLine,
+                            cursorColumn: body.editorState?.cursorColumn ?? this.cachedExternalContext.cursorColumn,
+                            selectionText: body.editorState?.selectionText ?? this.cachedExternalContext.selectionText,
+                            diagnosticsCount: body.editorState?.diagnosticsCount ??
+                                this.cachedExternalContext.diagnosticsCount,
+                            diagnosticsSummary: body.editorState?.diagnosticsSummary ??
+                                this.cachedExternalContext.diagnosticsSummary,
+                            terminalCommand: body.terminalState?.command ?? this.cachedExternalContext.terminalCommand,
+                            terminalExitCode: body.terminalState?.exitCode ?? this.cachedExternalContext.terminalExitCode,
+                            terminalDurationMs: body.terminalState?.durationMs ??
+                                this.cachedExternalContext.terminalDurationMs,
+                            terminalTail: body.terminalState?.tailOutput ?? this.cachedExternalContext.terminalTail,
+                        };
+                    }
+                    res.writeHead(200, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ ok: true }));
+                    return;
+                }
                 if (req.method === "POST" && url.pathname === "/events") {
                     const source = body.source;
                     const payload = body.payload !== undefined ? body.payload : body;
                     if (source === "face" && !this.status.cameraPaused) {
                         const score = Number(payload.score ?? 0);
+                        const rawUserStatus = typeof payload.user_status === "string" ? payload.user_status : "";
                         const state = payload.state === "confused" || score >= 0.7 ? "confused" : "calm";
                         this.status.faceState = state;
                         this.status.confusionScore = score;
-                        this.status.userStatusLabel =
-                            state === "confused" ? "Stuck" : score >= 0.4 ? "Thinking" : "Flow";
+                        this.status.sensorActive = true;
+                        this.status.lastSensorSeenAt = Date.now();
+                        this.status.userStatusRaw = rawUserStatus || undefined;
+                        if (payload.emotions && typeof payload.emotions === "object") {
+                            this.status.emotions = payload.emotions;
+                        }
+                        if (payload.gaze && typeof payload.gaze.zone === "string") {
+                            this.status.gazeZone = payload.gaze.zone;
+                        }
+                        if (Array.isArray(payload.reasons)) {
+                            this.status.liveReasons = payload.reasons.map(String);
+                        }
+                        if (rawUserStatus === "afk_away") {
+                            this.status.userStatusLabel = "AFK Guard";
+                        }
+                        else if (rawUserStatus === "talking_suppressed") {
+                            this.status.userStatusLabel = "Talking (DND)";
+                        }
+                        else if (rawUserStatus === "fatigued" ||
+                            Number(payload.emotions?.fatigued ?? 0) >= 0.6) {
+                            this.status.userStatusLabel = "Tired · Break";
+                        }
+                        else if (rawUserStatus === "frustrated_blocked") {
+                            this.status.userStatusLabel = "Frustrated";
+                        }
+                        else if (rawUserStatus.startsWith("stuck_")) {
+                            this.status.userStatusLabel = "Stuck";
+                        }
+                        else if (rawUserStatus === "confused_thinking" || score >= 0.4) {
+                            this.status.userStatusLabel = "Thinking";
+                        }
+                        else {
+                            this.status.userStatusLabel = state === "confused" ? "Stuck" : "Flow";
+                        }
                         this.callbacks.onStatusUpdate({ ...this.status });
                         this.broadcastEmbeddedWs({
                             type: "status",
                             timestamp: Date.now(),
                             faceState: this.status.faceState,
                             confusionScore: this.status.confusionScore,
-                            cooldownUntil: this.status.cooldownUntil,
+                            cooldownUntil: this.isInCooldown() ? this.status.cooldownUntil : null,
                             cameraPaused: this.status.cameraPaused,
                             eventCount: 1,
                         });
                     }
-                    else if (source === "brain" && (body.type === "diagnosis" || payload.summary)) {
+                    else if (source === "brain" &&
+                        (body.type === "diagnosis" ||
+                            body.type === "brain_diagnosis" ||
+                            payload.summary)) {
                         const diag = normalizeBrainDiagnosis(payload);
+                        this.status.askingBrain = false;
+                        this.status.brainOnline = diag.source === "model";
+                        this.callbacks.onStatusUpdate({ ...this.status });
                         this.broadcastEmbeddedWs({ type: "diagnosis_done", diagnosis: diag });
                         if (!this.isInCooldown()) {
                             this.callbacks.onDiagnosisTriggered(diag, "Role 3 Brain");
@@ -526,9 +798,19 @@ class WhackBrainBridge {
                     return;
                 }
                 if (req.method === "POST" && url.pathname === "/diagnose") {
+                    const liveCtx = this.contextProvider ? this.contextProvider() : {};
                     const diag = await this.requestDiagnosis(body.hintLevel || "hint", {
-                        activeFile: body.editorState?.activeFile,
-                        cursorLine: body.editorState?.cursorLine,
+                        ...liveCtx,
+                        workspaceRoot: body.repoPath || liveCtx.workspaceRoot,
+                        activeFile: body.editorState?.activeFile ?? liveCtx.activeFile,
+                        cursorLine: body.editorState?.cursorLine ?? liveCtx.cursorLine,
+                        cursorColumn: body.editorState?.cursorColumn ?? liveCtx.cursorColumn,
+                        selectionText: body.editorState?.selectionText ?? liveCtx.selectionText,
+                        diagnosticsCount: body.editorState?.diagnosticsCount ?? liveCtx.diagnosticsCount,
+                        diagnosticsSummary: body.editorState?.diagnosticsSummary ?? liveCtx.diagnosticsSummary,
+                        captureScreenshot: typeof body.captureScreenshot === "boolean"
+                            ? body.captureScreenshot
+                            : true,
                     });
                     res.writeHead(200, { "Content-Type": "application/json" });
                     res.end(JSON.stringify({ ok: true, diagnosis: diag }));
@@ -544,7 +826,6 @@ class WhackBrainBridge {
                 res.end(JSON.stringify({ ok: true }));
             });
         });
-        // Minimal RFC-6455 upgrade handler for any external WS subscribers
         srv.on("upgrade", (req, socket) => {
             const key = req.headers["sec-websocket-key"];
             if (!key || typeof key !== "string") {
@@ -565,9 +846,11 @@ class WhackBrainBridge {
         });
         await new Promise((resolve) => {
             srv.once("error", () => {
-                // Port became busy concurrently -> connect as external WS client instead
                 this.status.coreMode = "external";
                 this.connectExternalWs();
+                if (this.contextProvider) {
+                    this.pushExternalContext(this.contextProvider());
+                }
                 resolve();
             });
             srv.listen(parsedPort, "127.0.0.1", () => {
@@ -603,54 +886,184 @@ class WhackBrainBridge {
         }
     }
     /**
-     * Watches `signals/latest_brain_call.json` so `signals/prototype_signals_gui.py`
-     * immediately updates the VS Code Status Bar (and triggers Brain if stuck!).
+     * Watches `signals/latest_brain_call.json` without duplicating in-flight HTTP calls:
+     * - Tracks `${call_id}:${Boolean(http_completed)}`
+     * - `http_dispatched === true && !http_completed`: shows "Asking Brain..." spinner only
+     * - `http_dispatched === true && http_completed && http_error`: surfaces honest offline diagnosis
+     * - `http_dispatched === false`: invokes `requestDiagnosis(...)` from VS Code
      */
     watchSignalsOutbox() {
+        const candidateDirs = [];
+        const seenDirs = new Set();
+        const addCandidate = (dir) => {
+            const key = path.resolve(dir).toLowerCase();
+            if (!seenDirs.has(key) && fs.existsSync(dir)) {
+                seenDirs.add(key);
+                candidateDirs.push(path.resolve(dir));
+            }
+        };
         for (const root of this.workspaceRoots) {
-            const outboxPath = path.join(root, "signals", "latest_brain_call.json");
-            const signalsDir = path.dirname(outboxPath);
-            if (!fs.existsSync(signalsDir))
-                continue;
+            addCandidate(path.join(root, "signals"));
+            addCandidate(path.resolve(root, "..", "signals"));
+        }
+        addCandidate(path.resolve(this.extensionPath, "..", "signals"));
+        addCandidate(path.join(os.homedir(), "Desktop", "WHACK", "signals"));
+        addCandidate(path.join(os.homedir(), "WHACK", "signals"));
+        for (const signalsDir of candidateDirs) {
+            const outboxPath = path.join(signalsDir, "latest_brain_call.json");
+            // Pre-seed existing stale outbox file so old historical runs don't re-fire on launch
             try {
-                this.outboxWatcher = fs.watch(signalsDir, (_eventType, filename) => {
-                    if (filename !== "latest_brain_call.json")
+                if (fs.existsSync(outboxPath)) {
+                    const stat = fs.statSync(outboxPath);
+                    if (Date.now() - stat.mtimeMs > 3000) {
+                        const initialRaw = JSON.parse(fs.readFileSync(outboxPath, "utf8"));
+                        const initCallId = Number(initialRaw.call_id || 0);
+                        const initKey = `${initCallId}:${Boolean(initialRaw.http_completed)}`;
+                        this.seenOutboxStates.add(initKey);
+                        this.lastOutboxCallId = initCallId;
+                        this.lastOutboxMtimeMs = stat.mtimeMs;
+                    }
+                }
+            }
+            catch {
+                // Ignore unreadable initial outbox
+            }
+            try {
+                const watcher = fs.watch(signalsDir, (_eventType, filename) => {
+                    if (filename && filename !== "latest_brain_call.json")
                         return;
-                    try {
-                        const raw = JSON.parse(fs.readFileSync(outboxPath, "utf8"));
-                        const ts = Number(raw.timestamp || 0);
-                        if (ts <= this.lastOutboxTimestamp)
-                            return;
-                        this.lastOutboxTimestamp = ts;
-                        const stuckScore = Number(raw.user_status?.stuck_score ?? 0);
-                        const stateStr = String(raw.status || raw.user_status?.state || "focused_flow");
-                        this.status.confusionScore = stuckScore;
-                        this.status.faceState = stuckScore >= 0.65 ? "confused" : "calm";
-                        this.status.userStatusLabel = stateStr.includes("stuck")
-                            ? "Stuck"
-                            : stateStr.includes("afk")
-                                ? "AFK"
-                                : stuckScore >= 0.4
-                                    ? "Thinking"
-                                    : "Flow";
-                        this.callbacks.onStatusUpdate({ ...this.status });
-                        // If Signals+Face actively triggered a stuck call and Brain :5002 isn't running yet, trigger diagnosis!
-                        if ((stateStr.startsWith("stuck_") || stateStr === "frustrated_blocked") &&
-                            !this.isInCooldown()) {
-                            this.requestDiagnosis("hint", {}).then((diag) => {
-                                this.callbacks.onDiagnosisTriggered(diag, "Signals+Face Trigger");
-                            });
-                        }
+                    if (this.outboxDebounceTimer) {
+                        clearTimeout(this.outboxDebounceTimer);
                     }
-                    catch {
-                        // Ignore partial writes
-                    }
+                    this.outboxDebounceTimer = setTimeout(() => {
+                        this.outboxDebounceTimer = null;
+                        this.processSignalsOutboxFile(outboxPath);
+                    }, 45);
+                    this.outboxDebounceTimer.unref?.();
                 });
-                break;
+                this.outboxWatchers.push(watcher);
             }
             catch {
                 // Ignore fs.watch errors
             }
+        }
+    }
+    processSignalsOutboxFile(outboxPath) {
+        try {
+            if (!fs.existsSync(outboxPath))
+                return;
+            const stat = fs.statSync(outboxPath);
+            const raw = JSON.parse(fs.readFileSync(outboxPath, "utf8"));
+            const callId = Number(raw.call_id ?? 0);
+            const httpCompleted = Boolean(raw.http_completed);
+            // Detect `signals` process restart (`call_id` reset back to 1)
+            if ((callId > 0 && callId < this.lastOutboxCallId) ||
+                (callId === 1 &&
+                    this.lastOutboxCallId === 1 &&
+                    stat.mtimeMs - this.lastOutboxMtimeMs > 4000 &&
+                    !httpCompleted)) {
+                this.seenOutboxStates.clear();
+            }
+            const stateKey = callId > 0
+                ? `${callId}:${httpCompleted}`
+                : `ts:${Number(raw.timestamp || stat.mtimeMs)}:${httpCompleted}`;
+            if (this.seenOutboxStates.has(stateKey)) {
+                return;
+            }
+            this.seenOutboxStates.add(stateKey);
+            if (this.seenOutboxStates.size > 150) {
+                const oldest = this.seenOutboxStates.values().next().value;
+                if (oldest !== undefined) {
+                    this.seenOutboxStates.delete(oldest);
+                }
+            }
+            if (callId > 0) {
+                this.lastOutboxCallId = callId;
+            }
+            this.lastOutboxMtimeMs = stat.mtimeMs;
+            const userStatusObj = raw.user_status && typeof raw.user_status === "object"
+                ? raw.user_status
+                : raw.payload?.user_status && typeof raw.payload.user_status === "object"
+                    ? raw.payload.user_status
+                    : null;
+            const stateStr = String(typeof raw.user_status === "string"
+                ? raw.user_status
+                : userStatusObj?.state || raw.status || "focused_flow");
+            const stuckScore = Number(userStatusObj?.stuck_score ?? raw.confidence ?? this.status.confusionScore ?? 0);
+            this.status.confusionScore = stuckScore;
+            this.status.faceState =
+                stuckScore >= 0.65 || stateStr.includes("stuck") || stateStr.includes("frustrated")
+                    ? "confused"
+                    : "calm";
+            this.status.userStatusLabel = stateStr.includes("fatigued")
+                ? "Tired · Break"
+                : stateStr.includes("stuck") || stateStr.includes("frustrated")
+                    ? "Stuck"
+                    : stateStr.includes("afk")
+                        ? "AFK"
+                        : stuckScore >= 0.4
+                            ? "Thinking"
+                            : "Flow";
+            const reasons = Array.isArray(raw.reasons)
+                ? raw.reasons.map(String)
+                : Array.isArray(userStatusObj?.reasons)
+                    ? userStatusObj.reasons.map(String)
+                    : undefined;
+            const rawHint = raw.payload?.hintLevel || raw.hintLevel;
+            const hintLevel = rawHint === "nudge" || rawHint === "hint" || rawHint === "full_explanation"
+                ? rawHint
+                : "hint";
+            // Case 1: `signals` already dispatched `POST :5002/diagnose` and is awaiting response
+            if (raw.http_dispatched === true && !httpCompleted) {
+                this.status.askingBrain = true;
+                this.callbacks.onStatusUpdate({ ...this.status });
+                return;
+            }
+            // Case 2: `signals` completed its HTTP call
+            if (raw.http_dispatched === true && httpCompleted) {
+                this.status.askingBrain = false;
+                if (raw.http_error) {
+                    this.status.brainOnline = false;
+                    this.callbacks.onStatusUpdate({ ...this.status });
+                    if (!this.isInCooldown()) {
+                        const ctx = this.contextProvider ? this.contextProvider() : {};
+                        const offlineDiag = this.buildOfflineDiagnosis(hintLevel, String(raw.http_error), ctx.workspaceRoot || this.workspaceRoots[0], reasons);
+                        this.callbacks.onDiagnosisTriggered(offlineDiag, "Signals Trigger (Brain Offline)");
+                    }
+                    return;
+                }
+                this.status.brainOnline = raw.source !== "offline";
+                this.callbacks.onStatusUpdate({ ...this.status });
+                return;
+            }
+            this.callbacks.onStatusUpdate({ ...this.status });
+            // Case 3: Only call `requestDiagnosis` when `raw.http_dispatched === false`
+            if (raw.http_dispatched === false &&
+                !stateStr.includes("afk") &&
+                (stateStr.startsWith("stuck_") ||
+                    stateStr === "frustrated_blocked" ||
+                    stateStr === "fatigued" ||
+                    stuckScore >= 0.65) &&
+                !this.isInCooldown()) {
+                this.status.askingBrain = true;
+                this.callbacks.onStatusUpdate({ ...this.status });
+                const ctx = this.contextProvider ? this.contextProvider() : {};
+                this.requestDiagnosis(hintLevel, ctx, { reasons })
+                    .then((diag) => {
+                    this.status.askingBrain = false;
+                    this.callbacks.onStatusUpdate({ ...this.status });
+                    if (!this.isInCooldown()) {
+                        this.callbacks.onDiagnosisTriggered(diag, "Signals+Face Trigger");
+                    }
+                })
+                    .catch(() => {
+                    this.status.askingBrain = false;
+                    this.callbacks.onStatusUpdate({ ...this.status });
+                });
+            }
+        }
+        catch {
+            // Ignore partial atomic file writes
         }
     }
     isInCooldown() {
@@ -663,170 +1076,235 @@ class WhackBrainBridge {
         return true;
     }
     applyLocalFeedback(action) {
-        if (action === "dismiss" || action === "snooze") {
-            this.status.cooldownUntil = Date.now() + 3 * 60 * 1000;
+        if (action === "dismiss" || action === "snooze" || action === "break") {
+            const minutes = action === "break" ? 5 : 3;
+            this.status.cooldownUntil = Date.now() + minutes * 60 * 1000;
             this.status.faceState = "calm";
             this.status.confusionScore = 0.05;
-            this.status.userStatusLabel = "Snoozed";
+            this.status.askingBrain = false;
+            this.status.userStatusLabel = action === "break" ? "On Break ☕" : "Snoozed";
             this.callbacks.onStatusUpdate({ ...this.status });
         }
         if (this.status.coreMode === "external") {
             fetch(`${this.coreUrl}/feedback`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ action: action === "dismiss" ? "not_confused" : action }),
+                body: JSON.stringify({
+                    action: action === "dismiss" ? "not_confused" : action === "break" ? "snooze" : action,
+                }),
             }).catch(() => undefined);
         }
     }
+    buildOfflineDiagnosis(hintLevel, errorDetail, repoPath, reasons) {
+        const baseBrain = this.brainUrl.replace(/\/$/, "");
+        return {
+            diagnosisId: `offline-${Date.now()}`,
+            summary: "WHACK Brain (:5002) is offline.",
+            file: undefined,
+            lines: undefined,
+            quip: "Start brain.server on port 5002 so I can actually see what you're cooking.",
+            uncertain: true,
+            confidence: 0,
+            hintLevel,
+            source: "offline",
+            error: errorDetail,
+            repoPath,
+            reasons,
+            explanation: `Could not reach ${baseBrain}/diagnose (${errorDetail}). Run \`python -m uvicorn brain.server:app --port 5002\` with an API key in \`brain/.env\`.`,
+            citations: [],
+            suggestedFix: null,
+        };
+    }
     /**
-     * Calls Role 3 Brain (`:5002/diagnose`) -> External Core (`:3000/diagnose`) -> Built-in Mock Brain!
+     * Calls Role 3 Brain (`POST :5002/diagnose`) with a 28s timeout and full workspace context.
+     * Returns an honest `source: "offline"` payload if `:5002` is unreachable.
      */
-    async requestDiagnosis(hintLevel, editorContext) {
-        // 1. Try Role 3's Brain server directly on :5002
+    async requestDiagnosis(hintLevel, editorContext, options) {
+        const baseBrain = this.brainUrl.replace(/\/$/, "");
+        const liveCtx = this.contextProvider ? this.contextProvider() : {};
+        const merged = { ...liveCtx, ...editorContext };
+        const repoPath = merged.workspaceRoot || this.workspaceRoots[0]?.replace(/\\/g, "/");
         try {
             const controller = new AbortController();
-            const timer = setTimeout(() => controller.abort(), 3200);
-            const res = await fetch(`${this.brainUrl.replace(/\/$/, "")}/diagnose`, {
+            const timer = setTimeout(() => controller.abort(), BRAIN_HTTP_TIMEOUT_MS);
+            const res = await fetch(`${baseBrain}/diagnose`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
                     hintLevel,
+                    repoPath,
+                    captureScreenshot: merged.captureScreenshot ?? true,
+                    attemptLog: merged.attemptLog ?? "",
+                    userStatus: this.status.userStatusRaw,
+                    emotions: this.status.emotions,
+                    fusionReasons: options?.reasons ?? this.status.liveReasons,
                     editorState: {
-                        activeFile: editorContext.activeFile,
-                        cursorLine: editorContext.cursorLine,
-                        selectionText: editorContext.selectionText,
-                        diagnosticsCount: editorContext.diagnosticsCount ?? 0,
+                        activeFile: merged.activeFile ?? "",
+                        cursorLine: merged.cursorLine ?? 1,
+                        cursorColumn: merged.cursorColumn ?? 1,
+                        selectionText: merged.selectionText ?? "",
+                        diagnosticsCount: merged.diagnosticsCount ?? 0,
+                        diagnosticsSummary: merged.diagnosticsSummary ?? "",
                     },
-                    terminalState: editorContext.terminalCommand
+                    terminalState: merged.terminalCommand !== undefined
                         ? {
-                            command: editorContext.terminalCommand,
-                            exitCode: editorContext.terminalExitCode ?? 1,
-                            tailOutput: editorContext.terminalTail ?? "",
+                            command: merged.terminalCommand,
+                            exitCode: merged.terminalExitCode ?? 0,
+                            durationMs: merged.terminalDurationMs ?? 0,
+                            tailOutput: merged.terminalTail ?? "",
                         }
-                        : undefined,
+                        : null,
                     stream: false,
                 }),
                 signal: controller.signal,
             });
             clearTimeout(timer);
             if (res.ok) {
-                this.status.brainOnline = true;
-                this.callbacks.onStatusUpdate({ ...this.status });
                 const json = await res.json();
-                return normalizeBrainDiagnosis(json);
+                const normalized = normalizeBrainDiagnosis(json);
+                if (!normalized.repoPath && repoPath) {
+                    normalized.repoPath = repoPath;
+                }
+                this.status.brainOnline = normalized.source === "model";
+                this.callbacks.onStatusUpdate({ ...this.status });
+                return normalized;
             }
+            const httpErr = `HTTP ${res.status} ${res.statusText || ""}`.trim();
+            this.status.brainOnline = false;
+            this.callbacks.onStatusUpdate({ ...this.status });
+            return this.buildOfflineDiagnosis(hintLevel, httpErr, repoPath, options?.reasons);
         }
-        catch {
-            // Brain :5002 not running yet -> fall through cleanly
+        catch (err) {
+            const errMsg = err instanceof Error
+                ? err.name === "AbortError"
+                    ? `Timed out after ${BRAIN_HTTP_TIMEOUT_MS / 1000}s`
+                    : err.message
+                : String(err);
+            this.status.brainOnline = false;
+            this.callbacks.onStatusUpdate({ ...this.status });
+            return this.buildOfflineDiagnosis(hintLevel, errMsg, repoPath, options?.reasons);
         }
-        // 2. Fallback to built-in Mock Brain scenario (prefer active file if user has one open, else planted bug)
-        const fallback = (0, simulatorScenarios_1.buildSimulatedDiagnosis)("sliding_window", this.extensionPath);
-        fallback.hintLevel = hintLevel;
-        return fallback;
     }
     /**
-     * Sends a right-side Chatbox question to Role 3 Brain (`:5002`), External Core (`:3000/chat`),
-     * or the built-in context-aware Mock Brain responder.
+     * Sends a follow-up question directly to `POST :5002/chat` (28s timeout).
+     * Never calls `/diagnose`, so chatting never broadcasts to `:3000/events` or wipes `chatHistory`.
      */
     async sendChatMessage(params) {
         const baseBrain = this.brainUrl.replace(/\/$/, "");
-        // 1. Try Role 3 Brain `/chat` or `/diagnose` if `:5002` is online
+        const liveCtx = this.contextProvider ? this.contextProvider() : {};
+        const repoPath = params.repoPath ||
+            params.latestDiagnosis?.repoPath ||
+            liveCtx.workspaceRoot ||
+            this.workspaceRoots[0]?.replace(/\\/g, "/");
         try {
             const controller = new AbortController();
-            const timer = setTimeout(() => controller.abort(), 3200);
-            const res = await fetch(`${baseBrain}/diagnose`, {
+            const timer = setTimeout(() => controller.abort(), BRAIN_HTTP_TIMEOUT_MS);
+            const res = await fetch(`${baseBrain}/chat`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
-                    hintLevel: "full_explanation",
-                    attemptLog: `Developer follow-up question in IDE chat: "${params.message}"\nHighlighted code:\n${params.codeSnippet || ""}`,
-                    editorState: {
-                        activeFile: params.activeFile || params.latestDiagnosis?.file,
-                        cursorLine: params.highlightedLines?.[0] ?? 1,
-                        selectionText: params.codeSnippet,
-                    },
-                    stream: false,
+                    message: params.message,
+                    history: params.history,
+                    activeFile: params.activeFile || liveCtx.activeFile,
+                    highlightedLines: params.highlightedLines,
+                    codeSnippet: params.codeSnippet,
+                    latestDiagnosis: params.latestDiagnosis,
+                    repoPath,
                 }),
                 signal: controller.signal,
             });
             clearTimeout(timer);
             if (res.ok) {
                 const data = (await res.json());
-                const reply = data.reply
-                    ? String(data.reply)
-                    : data.explanation
-                        ? `${data.summary || ""}\n\n${data.explanation}`.trim()
-                        : String(data.summary || "Checked repository context.");
-                return { reply, mode: "brain_live" };
+                const mode = data.mode === "offline" || data.source === "offline"
+                    ? "offline"
+                    : "brain_live";
+                this.status.brainOnline = mode === "brain_live";
+                this.callbacks.onStatusUpdate({ ...this.status });
+                const fallbackFile = params.activeFile || params.latestDiagnosis?.file || liveCtx.activeFile;
+                const citations = parseCitations(data.citations, fallbackFile, params.highlightedLines);
+                const suggestedFix = parseSuggestedFix(data.suggestedFix || data.suggested_fix, fallbackFile, params.highlightedLines);
+                return {
+                    reply: typeof data.reply === "string" && data.reply.trim()
+                        ? data.reply
+                        : "No reply returned from Brain.",
+                    mode,
+                    error: typeof data.error === "string" ? data.error : undefined,
+                    citations: citations.length > 0 ? citations : undefined,
+                    suggestedFix: suggestedFix ?? null,
+                };
             }
+            const httpErr = `HTTP ${res.status}`;
+            this.status.brainOnline = false;
+            this.callbacks.onStatusUpdate({ ...this.status });
+            return {
+                reply: "Brain server (:5002) is unreachable — start `uvicorn brain.server:app --port 5002` to chat live.",
+                mode: "offline",
+                error: httpErr,
+            };
         }
-        catch {
-            // Role 3 Brain not running yet
+        catch (err) {
+            const errMsg = err instanceof Error
+                ? err.name === "AbortError"
+                    ? `Timed out after ${BRAIN_HTTP_TIMEOUT_MS / 1000}s`
+                    : err.message
+                : String(err);
+            this.status.brainOnline = false;
+            this.callbacks.onStatusUpdate({ ...this.status });
+            return {
+                reply: "Brain server (:5002) is unreachable — start `uvicorn brain.server:app --port 5002` to chat live.",
+                mode: "offline",
+                error: errMsg,
+            };
         }
-        // 2. Try External Core `/chat` if connected
-        if (this.status.coreMode === "external") {
-            try {
-                const res = await fetch(`${this.coreUrl}/chat`, {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify(params),
-                });
-                if (res.ok) {
-                    const data = (await res.json());
-                    if (data.reply) {
-                        return {
-                            reply: String(data.reply),
-                            mode: data.mode === "brain_live" ? "brain_live" : "mock_fallback",
-                        };
+    }
+    /**
+     * Triggers background repo wiki refresh (`POST :5002/wiki/update`) on `git commit`.
+     */
+    triggerWikiUpdate(repoPath) {
+        const baseBrain = this.brainUrl.replace(/\/$/, "");
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), BRAIN_HTTP_TIMEOUT_MS);
+        fetch(`${baseBrain}/wiki/update`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                repoPath: repoPath.replace(/\\/g, "/"),
+                allowModel: true,
+                force: true,
+            }),
+            signal: controller.signal,
+        })
+            .catch(() => undefined)
+            .finally(() => clearTimeout(timer));
+    }
+    pushExternalContext(ctx) {
+        this.cachedExternalContext = ctx;
+        if (this.status.coreMode !== "external")
+            return;
+        fetch(`${this.coreUrl}/context`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                workspaceRoot: ctx.workspaceRoot || this.workspaceRoots[0]?.replace(/\\/g, "/"),
+                editorState: {
+                    activeFile: ctx.activeFile ?? "",
+                    cursorLine: ctx.cursorLine ?? 1,
+                    cursorColumn: ctx.cursorColumn ?? 1,
+                    selectionText: ctx.selectionText ?? "",
+                    diagnosticsCount: ctx.diagnosticsCount ?? 0,
+                    diagnosticsSummary: ctx.diagnosticsSummary ?? "",
+                },
+                terminalState: ctx.terminalCommand !== undefined
+                    ? {
+                        command: ctx.terminalCommand,
+                        exitCode: ctx.terminalExitCode ?? 0,
+                        durationMs: ctx.terminalDurationMs ?? 0,
+                        tailOutput: ctx.terminalTail ?? "",
                     }
-                }
-            }
-            catch {
-                // Fall through to local Mock Brain
-            }
-        }
-        // 3. Built-in Context-Aware Mock Brain Chat Responder (reads actual highlighted code!)
-        const fileLabel = params.activeFile
-            ? path.basename(params.activeFile)
-            : params.latestDiagnosis?.file
-                ? path.basename(params.latestDiagnosis.file)
-                : "utils.py";
-        const lineLabel = params.highlightedLines
-            ? `L${params.highlightedLines[0]}–${params.highlightedLines[1]}`
-            : "highlighted lines";
-        const q = params.message.toLowerCase();
-        if (q.includes("hint") || q.includes("spoiler") || q.includes("without")) {
-            return {
-                mode: "mock_fallback",
-                reply: `**Socratic Hint (\`${fileLabel}\` · ${lineLabel}):**\n` +
-                    `Walk through \`total_items = 5\` and \`window_size = 3\` by hand. ` +
-                    `Valid windows start at \`0\`, \`1\`, and \`2\` (3 windows total). What is the last \`i\` produced by your \`range(...)\` right now?`,
-            };
-        }
-        if (q.includes("why") || q.includes("explain") || q.includes("cause")) {
-            return {
-                mode: "mock_fallback",
-                reply: `**Why \`${fileLabel}\` (${lineLabel}) fails:**\n` +
-                    `${params.latestDiagnosis?.summary || "The upper bound steps 1 index past the sequence end."}\n\n` +
-                    `Because Python's \`range(start, stop)\` stops at \`stop - 1\`, using \`total_items - window_size + 2\` sets the final \`start = total_items - window_size + 1\`, so \`end = start + window_size = total_items + 1\` — 1 element past \`len(data)\`.`,
-            };
-        }
-        if (q.includes("edge") || q.includes("other") || q.includes("case")) {
-            return {
-                mode: "mock_fallback",
-                reply: `**Edge Cases Checked for \`${fileLabel}\`:**\n` +
-                    `- \`window_size > total_items\`: \`range(0, negative_or_zero)\` returns \`[]\` cleanly.\n` +
-                    `- \`window_size == total_items\`: \`range(0, 1)\` yields \`[(0, total_items)]\`.\n` +
-                    `- \`total_items <= 0\`: Guarded at the top of the function.`,
-            };
-        }
-        return {
-            mode: "mock_fallback",
-            reply: `**Mock Brain (\`${fileLabel}\` · ${lineLabel}):**\n` +
-                `I'm inspecting your highlighted snippet${params.codeSnippet ? `:\n\`\`\`python\n${params.codeSnippet.trim()}\n\`\`\`` : "."}\n` +
-                `${params.latestDiagnosis?.summary || ""}\n\n` +
-                `Click **Preview Diff** above to compare the exact line fix side-by-side, or **Apply Suggested Fix** to patch it directly.`,
-        };
+                    : null,
+            }),
+        }).catch(() => undefined);
     }
     postTelemetryEvent(source, type, payload) {
         if (this.status.coreMode === "external") {
@@ -844,14 +1322,24 @@ class WhackBrainBridge {
     }
     dispose() {
         this.disposed = true;
+        this.clearPendingNudgeTimer();
+        if (this.outboxDebounceTimer) {
+            clearTimeout(this.outboxDebounceTimer);
+            this.outboxDebounceTimer = null;
+        }
         if (this.healthTimer) {
             clearInterval(this.healthTimer);
             this.healthTimer = null;
         }
-        if (this.outboxWatcher) {
-            this.outboxWatcher.close();
-            this.outboxWatcher = null;
+        for (const w of this.outboxWatchers) {
+            try {
+                w.close();
+            }
+            catch {
+                // Ignore close errors
+            }
         }
+        this.outboxWatchers = [];
         this.wsClient?.close();
         for (const sock of this.embeddedWsSockets) {
             sock.destroy();

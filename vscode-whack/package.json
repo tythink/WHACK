@@ -1,7 +1,7 @@
 {
   "name": "whack-vscode",
-  "displayName": "WHACK — Passive Confusion & Brain Assistant",
-  "description": "Stays small and passive in the VS Code Status Bar while coding; when WHACK Brain returns a diagnosis, plays a subtle chime + VS Code notification toast, highlights offending lines in the editor, and opens a right-side Diagnosis + Chat panel.",
+  "displayName": "WHACK — Live Multimodal Chef's Pass & Brain Assistant",
+  "description": "Real-time multimodal developer assistant that watches live facial affect, 3D gaze, cursor thrash, and terminal errors — chiming in with Gordon Ramsay code diagnostics, line highlights, 1-click diff fixes, and live mentoring chat.",
   "version": "0.1.0",
   "publisher": "whack-team",
   "license": "MIT",
@@ -24,24 +24,34 @@
   "contributes": {
     "commands": [
       {
-        "command": "whack.simulateBrain",
-        "title": "WHACK: Simulate Brain Result (Highlight Code + Open Right Panel)",
-        "icon": "$(beaker)"
+        "command": "whack.togglePanel",
+        "title": "WHACK: Open Chef's Pass & Live Mission Control",
+        "icon": "$(flame)"
       },
       {
-        "command": "whack.simulateActiveFile",
-        "title": "WHACK: Simulate Brain Result on Currently Active File",
-        "icon": "$(sparkle)"
+        "command": "whack.startLiveStack",
+        "title": "WHACK: Launch Full Live Stack (Brain :5002 + Camera Sensor)",
+        "icon": "$(rocket)"
+      },
+      {
+        "command": "whack.stopLiveStack",
+        "title": "WHACK: Stop Live Stack",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "whack.toggleSensorHud",
+        "title": "WHACK: Launch / Close Camera + 3D Gaze Sensor HUD",
+        "icon": "$(device-camera)"
+      },
+      {
+        "command": "whack.configureApiKey",
+        "title": "WHACK: Set Gemini / OpenAI / Anthropic API Key",
+        "icon": "$(key)"
       },
       {
         "command": "whack.triggerDiagnose",
-        "title": "WHACK: Trigger Brain Diagnosis Now (Ctrl+Shift+K)",
+        "title": "WHACK: Diagnose Active Code Now (Ctrl+Shift+K)",
         "icon": "$(pulse)"
-      },
-      {
-        "command": "whack.togglePanel",
-        "title": "WHACK: Toggle Right-Side Diagnosis & Chat Panel",
-        "icon": "$(layout-sidebar-right)"
       },
       {
         "command": "whack.previewDiff",
@@ -61,7 +71,11 @@
       },
       {
         "command": "whack.dismiss",
-        "title": "WHACK: Dismiss Highlight & Return to Passive Mode"
+        "title": "WHACK: Clear Highlights & Snooze 3m"
+      },
+      {
+        "command": "whack.takeBreak",
+        "title": "WHACK: Take 5m Break (Snooze WHACK)"
       },
       {
         "command": "whack.statusMenu",
@@ -77,17 +91,16 @@
         "command": "whack.triggerDiagnose",
         "key": "ctrl+shift+k",
         "mac": "cmd+shift+k"
-      },
-      {
-        "command": "whack.simulateBrain",
-        "key": "ctrl+alt+s",
-        "mac": "cmd+alt+s"
       }
     ],
     "menus": {
       "editor/title": [
         {
-          "command": "whack.simulateBrain",
+          "command": "whack.togglePanel",
+          "group": "navigation@98"
+        },
+        {
+          "command": "whack.triggerDiagnose",
           "group": "navigation@99"
         }
       ]
@@ -98,27 +111,32 @@
         "whack.coreServerUrl": {
           "type": "string",
           "default": "http://127.0.0.1:3000",
-          "description": "Local WHACK Core Server URL (embedded fallback starts automatically if not running)."
+          "description": "Local WHACK Core Server URL (embedded receiver starts automatically if not running)."
         },
         "whack.brainServerUrl": {
           "type": "string",
           "default": "http://127.0.0.1:5002",
-          "description": "Role 3 Brain LLM service URL (automatically switches from Mock Brain to Live Brain once online)."
+          "description": "Role 3 Brain LLM service URL (http://127.0.0.1:5002)."
         },
-        "whack.showSimulateStatusBarButton": {
-          "type": "boolean",
-          "default": true,
-          "description": "Show the 1-click 'Simulate Brain' test button in the bottom Status Bar."
+        "whack.whackRootPath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional path to your local WHACK repository folder (auto-detected from open workspace or ~/Desktop/WHACK when empty)."
+        },
+        "whack.pythonPath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional Python executable for starting Brain and Camera Sensor (auto-detects Conda whack-face env when empty)."
         },
         "whack.enableNotificationToast": {
           "type": "boolean",
           "default": true,
-          "description": "Show an interactive VS Code notification toast (Apply Fix / Preview Diff / Jump to Line / Dismiss) when WHACK Brain returns a diagnosis."
+          "description": "Show an interactive VS Code notification toast when WHACK Brain returns a diagnosis."
         },
         "whack.enableNotificationSound": {
           "type": "boolean",
           "default": true,
-          "description": "Play a subtle two-note notification chime when WHACK Brain returns a diagnosis or applies a fix."
+          "description": "Play a subtle two-note notification chime when WHACK Brain returns a live diagnosis or applies a fix."
         }
       }
     }

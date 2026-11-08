@@ -1,20 +1,13 @@
-"""Utility functions for metrics processing in demo-repo."""
+"""Utility functions for metrics processing."""
 
 from typing import List, Dict, Any, Optional
 
 def calculate_window_offsets(total_items: int, window_size: int) -> List[tuple]:
-    """Calculate (start, end) index pairs for sliding windows.
-
-    BUG (Commit 3): Off-by-one error on line 14:
-    Range condition iterates up to total_items + 1 instead of total_items - window_size + 1,
-    leading to an IndexError when accessing elements at the final offset.
-    """
+    """Calculate (start, end) index pairs for sliding windows."""
     offsets = []
     if total_items <= 0 or window_size <= 0:
         return offsets
 
-    # Bug introduced in Commit 3 (off-by-one error):
-    # Iterates up to total_items - window_size + 2 instead of + 1
     for i in range(0, total_items - window_size + 2):
         start = i
         end = i + window_size
@@ -25,9 +18,8 @@ def batch_slice(data: List[Any], offsets: List[tuple]) -> List[List[Any]]:
     """Slice data according to offset tuples."""
     batches = []
     for start, end in offsets:
-        # If end exceeds len(data), this raises IndexError or produces incorrect window
         if end > len(data):
-            raise IndexError(f"Offset end {end} exceeds data length {len(data)} (line 30)")
+            raise IndexError(f"Offset end {end} exceeds data length {len(data)}")
         batches.append(data[start:end])
     return batches
 

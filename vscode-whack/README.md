@@ -1,40 +1,43 @@
-# WHACK — Native VS Code Mode (`vscode-whack`)
+# WHACK — Native VS Code Extension (`vscode-whack`)
 
-Passive, multimodal debugging assistant for **VS Code / Antigravity**:
+Real-time, multimodal debugging assistant with Gordon Ramsay's live persona for **VS Code / Antigravity**.
 
-1. **Passive Default Mode**: Lives quietly in the bottom-right Status Bar (`WHACK · Flow 0.08`) with zero screen clutter while you code.
-2. **Auto-Trigger & Code Highlighting**: When the WHACK Brain returns a diagnosis, VS Code automatically opens the cited file on the left, scrolls to the target lines, highlights primary (`coral`) & secondary (`amber`) code ranges with inline CodeLens actions, and slides open the **Right-Side Diagnosis + Chat Panel**.
-3. **Graduated Help + 1-Click Fix + Right-Side Chat**:
-   - Switch between **`1 · Nudge`**, **`2 · Hint`**, and **`3 · Full Fix`**
-   - Click any **`file:line`** citation card to jump directly to that line
-   - **`Preview Side-by-Side Diff`** (`vscode.diff`) or **`Apply Suggested Fix`** in 1 click (`Ctrl+Z` undoable)
-   - Ask follow-up questions in the docked **Chatbox** (automatically attaches highlighted code context)
-   - Click **`✕ Dismiss`** to clear all highlights, snooze 3 minutes, and collapse back to the passive Status Bar
+## Redesigned GUI: "🔥 WHACK · Chef's Pass"
+
+1. **1-Click Live Stack Control (Zero Terminal Juggling)**:
+   - Click the **`WHACK`** pill in the bottom-right Status Bar (or the **`🔥`** icon in the top-right editor bar) to open **Chef's Pass**.
+   - **`🔑 Set Key`** prompts securely inside VS Code for your Gemini / OpenAI / Anthropic API key and writes `brain/.env` automatically.
+   - **`🚀 Launch Live Stack`** starts both the **Brain Server (`:5002`)** and the **Live Camera + 3D Gaze + OS Signal Sensor (`signals/prototype_signals_gui.py`)** in the background, with live LED status pills (`Brain · gemini-3-flash-preview` and `Sensor · Live`).
+   - **`📷 Sensor HUD`** toggles the companion camera & 3D gaze calibration window independently anytime.
+2. **Live Multimodal Telemetry Strip**:
+   - Displays your fused real-time state (`FLOW`, `THINKING`, `STUCK`, or `AFK GUARD`) and animated **`Conf`**, **`Frust`**, and **`Flow`** bars streamed live from your webcam + OS signals (`:3000/events`).
+3. **Proactive Live Trigger, Gordon's Live Roast & Graduated Fixes**:
+   - When `face/ + signals/` detects sustained confusion/frustration on screen (and never while AFK), it triggers `POST /diagnose` on `:5002` against whichever folder you currently have open in VS Code.
+   - VS Code plays a harmonic chime, opens the cited file, highlights primary (`coral`) & secondary (`amber`) code ranges with inline CodeLens actions, and presents **🔥 Gordon's Live Take** alongside **`1 · Nudge`**, **`2 · Hint`**, and **`3 · Full Fix`**.
+   - Click any **`file:line`** citation pill to jump directly to the bug, **`⇄ Preview Diff`** to inspect a side-by-side `vscode.diff`, **`✓ Apply Suggested Fix`** (`Ctrl+Z` undoable), or ask follow-up questions in the docked **Chatbox** (`POST /chat`).
 
 ---
 
-## Quick Start (Test Right Now — Before Role 3's Brain Is Ready)
+## Quick Start in VS Code
 
-### Option A: Install the Pre-Built `.vsix` in Your Current VS Code / Antigravity Window (Fastest)
+### Option A: Install the Pre-Built `.vsix` (Recommended)
 1. Press `Ctrl+Shift+X` (Extensions) -> click **`⋯`** (top-right of Extensions sidebar) -> **`Install from VSIX...`**
-2. Select `vscode-whack/whack-vscode-0.1.0.vsix`
-3. Look at the bottom-right Status Bar:
-   - Passive monitor pill: **`WHACK · Flow 0.08`**
-   - Test trigger button: **`🧪 Simulate Brain`** (or press `Ctrl+Alt+S`)
-4. Click **`🧪 Simulate Brain`** to watch it open `samples/utils.py`, highlight lines `18–21` (primary) and `29–30` (related), and open the right-side Diagnosis + Chat panel!
+2. Select `vscode-whack/whack-vscode-0.1.0.vsix` and reload VS Code if prompted.
+3. Click **`🔥 WHACK`** in the bottom-right Status Bar to open **Chef's Pass**.
+4. Click **`🔑 Set Key`** once to paste your API key (`GEMINI_API_KEY`, `OPENAI_API_KEY`, or `ANTHROPIC_API_KEY`).
+5. Click **`🚀 Launch Live Stack`** — Brain (`:5002`) and the Camera/Signal HUD start automatically!
+   - *Tip*: In the Sensor HUD window, look naturally at your code and press **`[C]`** (calibrate neutral expression) and **`[G]`** (9-point 3D gaze calibration), or press **`Ctrl+Shift+K`** / **`⚡ Diagnose`** inside VS Code anytime for an instant on-demand check.
 
 ### Option B: Launch Extension Development Host (`F5`)
-1. Open the `WHACK` root folder in standard VS Code
-2. Press **`F5`** (`Run WHACK VS Code Mode (Extension Host)` in `.vscode/launch.json`)
+1. Open the `WHACK` root folder in VS Code.
+2. Press **`F5`** (`Run WHACK VS Code Mode (Extension Host)` in `.vscode/launch.json`).
 
 ---
 
-## Connecting Role 3's Live Brain (Zero Rework)
+## Live Architecture & Endpoints
 
-`vscode-whack` automatically detects your teammates' pipelines with zero configuration:
-- **Live Brain (`http://127.0.0.1:5002`)**: Polls `GET /health` and calls `POST /diagnose` + `POST /chat` (falls back to Mock Brain automatically whenever `:5002` is offline).
-- **Face / Signals / Core (`http://127.0.0.1:3000` & `signals/latest_brain_call.json`)**: Connects to Core WebSocket `/ws` if `core` is running; otherwise starts a lightweight embedded `:3000` receiver AND watches `signals/latest_brain_call.json` so `face/prototype_gui.py` and `signals/brain_caller.py` trigger VS Code highlights immediately!
-- **Single Adapter File**: If your teammate changes any JSON field names in Brain, update only [`normalizeBrainDiagnosis()`](./src/brainAdapter.ts) in `src/brainAdapter.ts`.
+- **Live Brain (`http://127.0.0.1:5002`)**: Polls `GET /health`, triggers `POST /diagnose` with your active workspace `repoPath`, diagnostics, terminal state, and screen capture, calls `POST /chat` for follow-up chat, and updates `.whack/WIKI.md` via `POST /wiki/update` (plus `.git/hooks/post-commit` on every `git commit`). When `:5002` or the configured LLM API key is unavailable, the UI surfaces an honest offline/API-key banner rather than fabricated diagnoses.
+- **Signals & Core Bridge (`http://127.0.0.1:3000` & `signals/latest_brain_call.json`)**: Connects to Core WebSocket `/ws` if `core` is running; otherwise runs an embedded `:3000` receiver exposing `POST /events` and `GET /context` so `signals/brain_caller.py` reads your live VS Code workspace root, active file/cursor, diagnostics, and snooze/pause state automatically.
 
 ## Rebuilding After Edits
 

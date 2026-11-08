@@ -1,42 +1,38 @@
-"""Unit tests for cross-platform spatial normalization and trust hierarchy."""
+"""Unit tests for cross-platform spatial normalization, raw_width/raw_height scaling, and trust hierarchy."""
 
+import asyncio
+import base64
+import io
 import pytest
+from PIL import Image
+
+from brain.agent import DiagnosticEngine
 from brain.models import DiagnoseRequest
 from brain.screenshot import (
-    normalize_spatial_point,
-    normalize_request_spatial_points,
+    draw_spatial_markers_on_screenshot,
     evaluate_spatial_coherence,
     get_real_mouse_position,
-    SPATIAL_DISTANCE_THRESHOLD,
+    normalize_request_spatial_points,
+    normalize_spatial_point,
 )
 
 
 def test_normalize_spatial_point():
-    # 1920x1080 screen
-    # Point at (960, 540) is exactly center -> [500, 500] in Gemini [y, x]
     point = [960, 540]
     norm = normalize_spatial_point(point, img_width=1920, img_height=1080)
     assert norm == [500, 500]
 
-    # Point at top-left (0, 0) -> [0, 0]
     assert normalize_spatial_point([0, 0], 1920, 1080) == [0, 0]
-
-    # Point at bottom-right (1920, 1080) -> [1000, 1000]
     assert normalize_spatial_point([1920, 1080], 1920, 1080) == [1000, 1000]
-
-    # Out of bounds clamped: x=-50 -> 0, y=1500 -> 1000. Result [y, x] is [1000, 0]
     assert normalize_spatial_point([-50, 1500], 1920, 1080) == [1000, 0]
 
 
 def test_normalize_against_actual_image_dimensions():
-    # Demonstrating DPI scaling mismatch: reported screen is 1920x1080, but screenshot image is 3840x2160 (Retina/HiDPI 200%)
-    # Gaze reported at raw mouse pos [1920, 1080] on a 2x scaled image:
     norm = normalize_spatial_point([1920, 1080], img_width=3840, img_height=2160)
     assert norm == [500, 500]
 
 
-def test_diagnose_request_spatial_fields():
-    # Test that DiagnoseRequest accepts optional spatial fields in both camelCase and snake_case
+def test_diagnose_request_spatial_fields_and_aliases():
     req_data = {
         "terminalOutput": "TypeError",
         "gazePoint": [100, 200],
@@ -46,22 +42,60 @@ def test_diagnose_request_spatial_fields():
         "screenHeight": 1080,
     }
     req = DiagnoseRequest(**req_data)
-    assert req.gazePoint == [100, 200]
-    assert req.cursorScreenPos == [150, 250]
-    assert req.caretScreenPos == [120, 220]
+    assert req.gazePoint == [100.0, 200.0]
+    assert req.cursorScreenPos == [150.0, 250.0]
+    assert req.caretScreenPos == [120.0, 220.0]
     assert req.screenWidth == 1920
     assert req.screenHeight == 1080
 
     norm_pts = normalize_request_spatial_points(req, actual_width=1920, actual_height=1080)
-    assert "gaze" in norm_pts
-    assert "cursor" in norm_pts
-    assert "caret" in norm_pts
-    # Check [y, x] order: y=200/1080 -> 185, x=100/1920 -> 52
     assert norm_pts["gaze"] == [185, 52]
+
+    # Alternate names (eyeGaze, mouseCursor, keyboardCursor) including {x, y} dicts
+    alt_req = DiagnoseRequest(
+        eyeGaze={"x": 960, "y": 540},
+        mouseCursor=[480, 270],
+        keyboardCursor={"x": 1920, "y": 1080},
+    )
+    alt_norm = normalize_request_spatial_points(alt_req, actual_width=1920, actual_height=1080)
+    assert alt_norm["gaze"] == [500, 500]
+    assert alt_norm["cursor"] == [250, 250]
+    assert alt_norm["caret"] == [1000, 1000]
+
+
+def test_engine_normalizes_against_raw_dimensions_not_resized_1280x720(monkeypatch: pytest.MonkeyPatch):
+    """Ensure 1920x1080 screenshots resized to 1280x720 normalize coordinates against raw 1920x1080!"""
+    for k in ("GEMINI_API_KEY", "GOOGLE_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
+        monkeypatch.delenv(k, raising=False)
+
+    img = Image.new("RGB", (1920, 1080), color=(20, 25, 30))
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=70)
+    b64_img = base64.b64encode(buf.getvalue()).decode("utf-8")
+
+    req = DiagnoseRequest(
+        hintLevel="hint",
+        screenshot=b64_img,
+        gazePoint=[960, 540],
+        cursorScreenPos=[1920, 1080],
+        caretScreenPos=[480, 270],
+        screenWidth=1920,
+        screenHeight=1080,
+    )
+
+    eng = DiagnosticEngine()
+    diag = asyncio.run(eng.diagnose(req))
+    assert diag.trace is not None
+    # Resized payload dimensions are 1280x720, while spatial_points MUST be normalized against raw 1920x1080!
+    assert diag.trace.screenshot_dimensions == (1280, 720)
+    assert diag.trace.spatial_points == {
+        "gaze": [500, 500],
+        "cursor": [1000, 1000],
+        "caret": [250, 250],
+    }
 
 
 def test_spatial_coherence_evaluation():
-    # Case 1: Gaze is close to cursor/caret (<= 200 units)
     points_close = {
         "caret": [400, 300],
         "cursor": [410, 310],
@@ -71,7 +105,6 @@ def test_spatial_coherence_evaluation():
     assert "close together" in note_close
     assert "no distinguishable spatial information" in note_close
 
-    # Case 2: Gaze is divergent (> 200 units)
     points_far = {
         "caret": [200, 200],
         "cursor": [210, 210],
@@ -88,7 +121,6 @@ def test_get_real_mouse_position_windows_success(monkeypatch):
     monkeypatch.setattr(sys, "platform", "win32")
 
     def mock_get_cursor_pos(byref_pt):
-        # Access the underlying structure from byref/pointer
         pt = byref_pt._obj
         pt.x = 800
         pt.y = 600
@@ -96,11 +128,9 @@ def test_get_real_mouse_position_windows_success(monkeypatch):
 
     monkeypatch.setattr(ctypes.windll.user32, "GetCursorPos", mock_get_cursor_pos)
 
-    # Standard call
     pos = get_real_mouse_position()
     assert pos == (800, 600)
 
-    # Call with return_debug=True
     pos, debug_info = get_real_mouse_position(return_debug=True)
     assert pos == (800, 600)
     assert debug_info["raw_ret"] == 1
@@ -130,11 +160,6 @@ def test_get_real_mouse_position_windows_failure_raises(monkeypatch):
 
 
 def test_draw_spatial_markers_on_screenshot(tmp_path):
-    from PIL import Image
-    import io
-    from brain.screenshot import draw_spatial_markers_on_screenshot
-
-    # Synthetic 200x200 canvas
     img = Image.new("RGB", (200, 200), color=(30, 30, 30))
     buf = io.BytesIO()
     img.save(buf, format="PNG")

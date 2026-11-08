@@ -11,7 +11,7 @@ Combines:
       4. `emotions`: all 6 emotion scores (`confused`, `frustrated`, `surprised`, `flow`, `fatigued`, `delighted`)
 
 Run from repository root:
-    C:\\Users\\davec\\anaconda3\\envs\\whack-face\\python.exe signals/prototype_signals_gui.py
+    python signals/prototype_signals_gui.py
 """
 
 from __future__ import annotations
@@ -80,6 +80,8 @@ STATUS_BADGE_STYLES: Dict[str, Tuple[str, str, str]] = {
     "stuck_erase_thrash": ("STUCK: ERASE / UNDO LOOP  -> CALL BRAIN", "#7c2d12", "#fed7aa"),
     "stuck_attention_split": ("STUCK: CARET <-> ERROR PING-PONG  -> CALL BRAIN", "#78350f", "#fde68a"),
     "frustrated_blocked": ("FRUSTRATED / BLOCKED  -> CALL BRAIN", "#881337", "#fda4af"),
+    "error_confusion": ("ERROR CONFUSION  -> CALL BRAIN (DIAGNOSE)", "#7f1d1d", "#fecaca"),
+    "code_comprehension_confusion": ("CODE COMPREHENSION CONFUSION  -> CALL BRAIN (EXPLAIN)", "#1e3a8a", "#bfdbfe"),
 }
 
 SAMPLE_SANDBOX_CODE = """def compute_moving_average(values, window=3):
@@ -142,13 +144,19 @@ class CombinedSignalsFaceGUI:
         self.fusion_engine = MultimodalStatusFusionEngine(
             cooldown_sec=cooldown_sec,
             trigger_hold_sec=1.5,
+            screen_height=self.screen_h,
         )
         self.brain_caller = ActiveBrainCaller(
             brain_url=brain_url,
-            http_enabled=False,
+            http_enabled=True,
             console_log=not headless_test,
+            on_complete_callback=self._on_brain_call_complete,
         )
-        self.core_client = AsyncEventClient(endpoint=core_events_url, heartbeat_sec=3.0)
+        self.core_client = AsyncEventClient(
+            endpoint=core_events_url,
+            heartbeat_sec=1.5,
+            enabled=True,
+        )
 
         self.cap: Optional[cv2.VideoCapture] = None if headless_test else face_gui.open_camera(camera_index)
         self._running = True
@@ -237,8 +245,14 @@ class CombinedSignalsFaceGUI:
             hdr, text="Desktop Dots [O]: OFF", bg="#334155", fg="#e2e8f0", command=self.toggle_desktop_overlay, **btn_cfg
         )
         self.overlay_btn.pack(side=tk.RIGHT, padx=3)
+        http_on = self.brain_caller.http_enabled
         self.brain_http_btn = tk.Button(
-            hdr, text="Brain :5002 HTTP [B]: OFF", bg="#334155", fg="#e2e8f0", command=self.toggle_brain_http, **btn_cfg
+            hdr,
+            text=f"Brain :5002 HTTP [B]: {'ON' if http_on else 'OFF'}",
+            bg="#059669" if http_on else "#334155",
+            fg="#ffffff" if http_on else "#e2e8f0",
+            command=self.toggle_brain_http,
+            **btn_cfg,
         )
         self.brain_http_btn.pack(side=tk.RIGHT, padx=3)
         tk.Button(
@@ -330,32 +344,6 @@ class CombinedSignalsFaceGUI:
         self.sandbox_text.pack(fill=tk.BOTH, expand=True)
         self.sandbox_text.insert("1.0", SAMPLE_SANDBOX_CODE)
         self.sandbox_text.bind("<KeyPress>", self._on_sandbox_keypress)
-
-        sim_bar = tk.Frame(ed_card, bg="#111827")
-        sim_bar.pack(fill=tk.X, pady=(6, 0))
-        tk.Label(sim_bar, text="Terminal Sim:", bg="#111827", fg="#94a3b8", font=("Segoe UI", 8, "bold")).pack(side=tk.LEFT)
-        tk.Button(
-            sim_bar,
-            text="+ Failing pytest (IndexError)",
-            bg="#7f1d1d",
-            fg="#fecaca",
-            font=("Segoe UI", 8, "bold"),
-            relief=tk.FLAT,
-            padx=7,
-            pady=3,
-            command=self._sim_failing_command,
-        ).pack(side=tk.LEFT, padx=5)
-        tk.Button(
-            sim_bar,
-            text="✓ Passing pytest (Exit 0)",
-            bg="#065f46",
-            fg="#a7f3d0",
-            font=("Segoe UI", 8, "bold"),
-            relief=tk.FLAT,
-            padx=7,
-            pady=3,
-            command=self._sim_passing_command,
-        ).pack(side=tk.LEFT, padx=2)
 
         # === COLUMN 1: 3-Coordinate Screen Radar + Signal/Facial Meters ===
         col1 = tk.Frame(body, bg="#0b1120")
@@ -627,22 +615,6 @@ class CombinedSignalsFaceGUI:
         except Exception:
             return None
 
-    def _sim_failing_command(self) -> None:
-        self.fusion_engine.record_terminal_run(
-            command="pytest tests/test_Stage1.py",
-            exit_code=1,
-            tail_output="Traceback (most recent call last):\n  File 'app.py', line 42\nIndexError: list index out of range",
-            duration_ms=410,
-        )
-
-    def _sim_passing_command(self) -> None:
-        self.fusion_engine.record_terminal_run(
-            command="pytest tests/test_Stage1.py",
-            exit_code=0,
-            tail_output="4 passed in 0.28s",
-            duration_ms=280,
-        )
-
     def _toggle_mesh(self) -> None:
         self.show_mesh = not self.show_mesh
 
@@ -743,12 +715,19 @@ class CombinedSignalsFaceGUI:
             face_gui._make_window_clickthrough(cw)
             self._caret_dot_win = cw
 
-        gx, gy = status.eye_gaze
-        self._gaze_dot_win.geometry(f"44x44+{max(0, gx - 22)}+{max(0, gy - 22)}")
-        if status.keyboard_cursor_detected:
+        if status.face_detected and status.eye_gaze is not None:
+            gx, gy = status.eye_gaze
+            self._gaze_dot_win.deiconify()
+            self._gaze_dot_win.geometry(f"44x44+{max(0, gx - 22)}+{max(0, gy - 22)}")
+        else:
+            self._gaze_dot_win.withdraw()
+
+        if status.keyboard_cursor_detected and status.keyboard_cursor is not None:
             cx, cy = status.keyboard_cursor
             self._caret_dot_win.deiconify()
             self._caret_dot_win.geometry(f"20x32+{max(0, cx - 10)}+{max(0, cy - 16)}")
+        else:
+            self._caret_dot_win.withdraw()
 
     # ------------------------------------------------------------------
     # 10-Step Head-Invariant 3D Gaze Calibration (`[G]`)
@@ -958,13 +937,14 @@ class CombinedSignalsFaceGUI:
 
         mx, my = _map_xy(status.mouse_cursor)
         cx, cy = _map_xy(status.keyboard_cursor)
-        gx, gy = _map_xy(status.eye_gaze)
 
-        # Connector lines showing spatial triangle relationships
-        if status.keyboard_cursor_detected:
-            line_col = "#f59e0b" if status.gaze_locked_near_caret else "#475569"
-            cv.create_line(gx, gy, cx, cy, fill=line_col, dash=(3, 3), width=1)
-        cv.create_line(gx, gy, mx, my, fill="#334155", dash=(2, 4), width=1)
+        # Connector lines showing spatial triangle relationships (only when eye gaze is tracked)
+        if status.face_detected:
+            gx, gy = _map_xy(status.eye_gaze)
+            if status.keyboard_cursor_detected:
+                line_col = "#f59e0b" if status.gaze_locked_near_caret else "#475569"
+                cv.create_line(gx, gy, cx, cy, fill=line_col, dash=(3, 3), width=1)
+            cv.create_line(gx, gy, mx, my, fill="#334155", dash=(2, 4), width=1)
 
         # 1. Mouse Cursor (White dot + label)
         cv.create_oval(mx - 5, my - 5, mx + 5, my + 5, fill="#f8fafc", outline="#0f172a", width=1)
@@ -978,10 +958,12 @@ class CombinedSignalsFaceGUI:
             if status.gaze_locked_near_caret:
                 cv.create_oval(cx - 18, cy - 18, cx + 18, cy + 18, outline="#f59e0b", dash=(2, 2))
 
-        # 3. 3D Eye Gaze (Cyan bullseye ring)
-        g_col = "#f43f5e" if status.gaze_zone == "looking_away" else "#38bdf8"
-        cv.create_oval(gx - 11, gy - 11, gx + 11, gy + 11, outline=g_col, width=2)
-        cv.create_oval(gx - 2, gy - 2, gx + 2, gy + 2, fill="#ffffff", outline="#ffffff")
+        # 3. 3D Eye Gaze (Cyan bullseye ring, drawn only when face/gaze is present)
+        if status.face_detected:
+            gx, gy = _map_xy(status.eye_gaze)
+            g_col = "#f43f5e" if status.gaze_zone == "looking_away" else "#38bdf8"
+            cv.create_oval(gx - 11, gy - 11, gx + 11, gy + 11, outline=g_col, width=2)
+            cv.create_oval(gx - 2, gy - 2, gx + 2, gy + 2, fill="#ffffff", outline="#ffffff")
 
     def _set_meter(self, key: str, ratio: float, label_str: str) -> None:
         bar_cv, rect_id, val_lbl = self._meter_widgets[key]
@@ -990,20 +972,43 @@ class CombinedSignalsFaceGUI:
         bar_cv.coords(rect_id, 0, 0, fill_w, 10)
         val_lbl.configure(text=label_str)
 
-    def _append_call_log(self, rec) -> None:
-        if rec is None or rec.call_id <= self._last_logged_call_id:
+    def _on_brain_call_complete(self, _rec) -> None:
+        if not self._running:
             return
-        self._last_logged_call_id = rec.call_id
-        emo_str = f"conf={rec.emotions.get('confused', 0.0):.2f} frust={rec.emotions.get('frustrated', 0.0):.2f}"
-        line = (
-            f"[{rec.timestamp_str}] #{rec.call_id} {rec.trigger_status} "
-            f"| mouse={rec.mouse_cursor} caret|={rec.keyboard_cursor} gaze={rec.eye_gaze} | {emo_str}\n"
-            f"   -> {rec.response_summary}\n"
-        )
+        try:
+            self.root.after(0, self._refresh_call_log)
+        except Exception:
+            pass
+
+    def _refresh_call_log(self) -> None:
+        if not self._running:
+            return
+        calls = self.brain_caller.recent_calls()
+        if calls:
+            self._last_logged_call_id = max(self._last_logged_call_id, calls[-1].call_id)
+        lines: List[str] = []
+        for rec in calls:
+            emo_str = (
+                f"conf={rec.emotions.get('confused', 0.0):.2f} "
+                f"frust={rec.emotions.get('frustrated', 0.0):.2f}"
+            )
+            src_tag = f" [{rec.source}]" if rec.source else ""
+            lines.append(
+                f"[{rec.timestamp_str}] #{rec.call_id} {rec.trigger_status}{src_tag} "
+                f"| mouse={rec.mouse_cursor} caret|={rec.keyboard_cursor} gaze={rec.eye_gaze} | {emo_str}\n"
+                f"   -> {rec.response_summary}\n"
+            )
         self.call_log_text.configure(state=tk.NORMAL)
-        self.call_log_text.insert(tk.END, line)
-        self.call_log_text.see(tk.END)
+        self.call_log_text.delete("1.0", tk.END)
+        if lines:
+            self.call_log_text.insert(tk.END, "".join(lines))
+            self.call_log_text.see(tk.END)
         self.call_log_text.configure(state=tk.DISABLED)
+
+    def _append_call_log(self, rec) -> None:
+        if rec is None:
+            return
+        self._refresh_call_log()
 
     def _update_ui_panels(
         self,
@@ -1057,7 +1062,12 @@ class CombinedSignalsFaceGUI:
         c_tag = f"dwell {sig.caret_dwell_ms / 1000.0:4.1f}s" if status.keyboard_cursor_detected else "not focused"
         self.coord_mouse_lbl.configure(text=f"1. mouse_cursor    : ({mx:4d}, {my:4d})   idle  {mouse_s:4.1f}s")
         self.coord_caret_lbl.configure(text=f"2. keyboard_cursor : ({cx:4d}, {cy:4d})   {c_tag}")
-        self.coord_gaze_lbl.configure(text=f"3. eye_gaze        : ({gx:4d}, {gy:4d})   dist->| {status.dist_gaze_to_caret_px:4.0f}px")
+        if status.face_detected:
+            self.coord_gaze_lbl.configure(
+                text=f"3. eye_gaze        : ({gx:4d}, {gy:4d})   dist->| {status.dist_gaze_to_caret_px:4.0f}px"
+            )
+        else:
+            self.coord_gaze_lbl.configure(text="3. eye_gaze        : (  --,   --)   no face / camera")
         self.coord_emotions_lbl.configure(
             text=(
                 f"4. emotions (6)    : conf={em['confused']:.2f} frust={em['frustrated']:.2f} "
@@ -1134,7 +1144,12 @@ class CombinedSignalsFaceGUI:
                 raw_mirrored = cv2.flip(raw, 1)
 
         if raw_mirrored is None:
-            face_detected = self._latest_status.face_detected if self._latest_status is not None else True
+            face_detected = False
+            gaze_res = None
+            emotion_res = None
+            body_res = None
+            self.emo_summary_lbl.configure(text="No Camera", fg="#94a3b8")
+            self.gesture_lbl.configure(text="Camera unavailable — OS Signals mode active")
             display_bgr = np.zeros((self.VIDEO_H, self.VIDEO_W, 3), dtype=np.uint8)
             cv2.putText(
                 display_bgr,
@@ -1219,9 +1234,6 @@ class CombinedSignalsFaceGUI:
                 self.gesture_lbl.configure(
                     text=f"Gesture: {g_desc[:28]}  |  Talking: {'YES' if emotion_res.talking else 'NO'}"
                 )
-
-                face_payload = build_event_payload(emotion_res, gaze_res, body_res)
-                self.core_client.maybe_emit(face_payload)
             else:
                 self.emo_summary_lbl.configure(text="No Face", fg="#94a3b8")
                 self.gesture_lbl.configure(text="Gesture: --  |  Face out of frame (AFK check active)")
@@ -1263,8 +1275,60 @@ class CombinedSignalsFaceGUI:
             body=body_res,
             face_detected=face_detected,
             now=now,
+            screen_height=self.screen_h,
         )
         self._latest_status = status
+
+        # Emit live `face_telemetry` + fused status to `:3000/events` (works both with camera and OS-only!)
+        if emotion_res is not None and gaze_res is not None:
+            fused_ev = build_event_payload(emotion_res, gaze_res, body_res)
+            fused_ev["type"] = "face_telemetry"
+            if status.status in ACTIONABLE_STUCK_STATES and status.status != "afk_away":
+                if status.status == "fatigued":
+                    fused_ev["state"] = "fatigued"
+                else:
+                    fused_ev["state"] = "confused"
+                fused_ev["score"] = round(max(float(fused_ev.get("score", 0.0)), status.stuck_score), 2)
+        else:
+            is_stuck = status.status in ACTIONABLE_STUCK_STATES and status.status != "afk_away"
+            score_val = (
+                0.0 if status.status in ("afk_away", "talking_suppressed") else status.stuck_score
+            )
+            if status.status == "fatigued":
+                fallback_state = "fatigued"
+            elif is_stuck or score_val >= 0.56:
+                fallback_state = "confused"
+            else:
+                fallback_state = "calm"
+            fused_ev = {
+                "source": "face",
+                "type": "face_telemetry",
+                "timestamp": int(time.time() * 1000),
+                "state": fallback_state,
+                "score": score_val,
+                "confidence": status.confidence,
+                "primary_emotion": status.primary_emotion,
+                "primary_score": status.emotions.get(status.primary_emotion, 0.0),
+                "emotions": dict(status.emotions),
+                "gaze": {
+                    "zone": status.gaze_zone,
+                    "screen_x_px": status.eye_gaze[0],
+                    "screen_y_px": status.eye_gaze[1],
+                    "confidence": 0.0,
+                },
+                "talking": False,
+            }
+        fused_ev["user_status"] = status.status
+        fused_ev["stuck_score"] = status.stuck_score
+        fused_ev["face_detected"] = status.face_detected
+        fused_ev["mouse_cursor"] = {"x": status.mouse_cursor[0], "y": status.mouse_cursor[1]}
+        fused_ev["keyboard_cursor"] = {
+            "x": status.keyboard_cursor[0],
+            "y": status.keyboard_cursor[1],
+            "detected": status.keyboard_cursor_detected,
+        }
+        fused_ev["reasons"] = list(status.reasons)
+        self.core_client.maybe_emit(fused_ev)
 
         call_rec = self.brain_caller.maybe_invoke(
             status=status,
