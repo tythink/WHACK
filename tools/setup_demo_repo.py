@@ -32,6 +32,49 @@ COMMITS = [
     },
 ]
 
+SCENARIO_BRANCHES = [
+    {
+        "branch": "scenario-1",
+        "stage": "03-bug",
+        "message": "perf: optimize window buffer and index calculation",
+    },
+    {
+        "branch": "scenario-2",
+        "stage": "03-bug-2-scoping",
+        "message": "fix: aggregate nested stage metric calculations",
+    },
+    {
+        "branch": "scenario-3",
+        "stage": "03-bug-3-none-deref",
+        "message": "feat: simplify telemetry event metadata extraction",
+    },
+    {
+        "branch": "scenario-4",
+        "stage": "03-bug-4-mutable-default",
+        "message": "feat: optimize audit log history buffer",
+    },
+    {
+        "branch": "scenario-5",
+        "stage": "03-bug-5-unawaited",
+        "message": "feat: fetch async metric readings",
+    },
+    {
+        "branch": "scenario-6",
+        "stage": "03-bug-6-zero-division",
+        "message": "perf: inline throughput calculation",
+    },
+    {
+        "branch": "scenario-7",
+        "stage": "03-bug-7-regex",
+        "message": "fix: parse log line status codes",
+    },
+    {
+        "branch": "scenario-8",
+        "stage": "03-bug-8-type-mismatch",
+        "message": "feat: compare raw readings directly",
+    },
+]
+
 def run_git(cmd, cwd):
     res = subprocess.run(
         ["git"] + cmd,
@@ -43,6 +86,16 @@ def run_git(cmd, cwd):
     if res.returncode != 0:
         raise RuntimeError(f"git {' '.join(cmd)} failed:\n{res.stderr.strip()}")
     return res.stdout.strip()
+
+def copy_stage_files(stage_path: Path, target_dir: Path):
+    for item in stage_path.iterdir():
+        dest = target_dir / item.name
+        if item.is_dir():
+            if dest.exists():
+                shutil.rmtree(dest)
+            shutil.copytree(item, dest)
+        else:
+            shutil.copy2(item, dest)
 
 def build_repo(target_dir: Path) -> Path:
     target_dir = target_dir.resolve()
@@ -58,35 +111,40 @@ def build_repo(target_dir: Path) -> Path:
     run_git(["config", "user.name", "Demo Engineer"], cwd=target_dir)
     run_git(["config", "user.email", "engineer@example.com"], cwd=target_dir)
 
-    for i, step in enumerate(COMMITS, 1):
-        stage_name = step["stage"]
-        stage_path = STAGES_DIR / stage_name
-        if not stage_path.exists():
-            raise FileNotFoundError(f"Stage directory not found: {stage_path}")
+    # 1. Apply 01-initial
+    copy_stage_files(STAGES_DIR / "01-initial", target_dir)
+    run_git(["add", "."], cwd=target_dir)
+    run_git(["commit", "-m", COMMITS[0]["message"]], cwd=target_dir)
 
-        message = step["message"]
-        print(f"  [{i}/{len(COMMITS)}] Applying stage {stage_name}: '{message}'")
+    # 2. Apply 02-tests (baseline passing commit)
+    copy_stage_files(STAGES_DIR / "02-tests", target_dir)
+    run_git(["add", "."], cwd=target_dir)
+    run_git(["commit", "-m", COMMITS[1]["message"]], cwd=target_dir)
+    baseline_commit = run_git(["rev-parse", "HEAD"], cwd=target_dir)
+    run_git(["tag", "-f", "baseline"], cwd=target_dir)
 
-        # Copy files from stage into target_dir
-        for item in stage_path.iterdir():
-            dest = target_dir / item.name
-            if item.is_dir():
-                if dest.exists():
-                    shutil.rmtree(dest)
-                shutil.copytree(item, dest)
-            else:
-                shutil.copy2(item, dest)
+    # 3. Apply 03-bug on main (Scenario 1)
+    copy_stage_files(STAGES_DIR / "03-bug", target_dir)
+    run_git(["add", "."], cwd=target_dir)
+    run_git(["commit", "-m", COMMITS[2]["message"]], cwd=target_dir)
+    run_git(["branch", "-f", "scenario-1"], cwd=target_dir)
+    print(f"  ✓ Created main & scenario-1 at {run_git(['rev-parse', '--short', 'HEAD'], cwd=target_dir)}")
 
-        # Stage and commit
+    # 4. Create scenario branches 2 through 8 from baseline commit
+    for sc in SCENARIO_BRANCHES[1:]:
+        branch = sc["branch"]
+        stage = sc["stage"]
+        msg = sc["message"]
+        run_git(["checkout", "-B", branch, baseline_commit], cwd=target_dir)
+        copy_stage_files(STAGES_DIR / stage, target_dir)
         run_git(["add", "."], cwd=target_dir)
-        run_git(["commit", "-m", message], cwd=target_dir)
+        run_git(["commit", "-m", msg], cwd=target_dir)
+        head_short = run_git(["rev-parse", "--short", "HEAD"], cwd=target_dir)
+        print(f"  ✓ Created {branch} at {head_short}: '{msg}'")
 
-    print(f"✓ Repository built successfully at {target_dir}")
-    log_output = run_git(["log", "--oneline"], cwd=target_dir)
-    print("Recent commits:")
-    for line in log_output.splitlines():
-        print(f"  {line}")
-
+    # 5. Return to main
+    run_git(["checkout", "main"], cwd=target_dir)
+    print(f"\n✓ Repository built successfully at {target_dir} with all 8 scenario branches.")
     return target_dir
 
 def main():

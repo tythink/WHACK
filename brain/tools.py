@@ -328,22 +328,77 @@ TOOL_DEFINITIONS = [
             },
         },
     },
+    {
+        "name": "get_wiki",
+        "description": "Get architectural intent and design decisions for a specific module or subsystem",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "module": {
+                    "type": "string",
+                    "description": "Module name to inspect (e.g. 'utils' or 'pipeline')",
+                }
+            },
+        },
+    },
+    {
+        "name": "enclosing_symbol",
+        "description": "Find the function or class enclosing a specific file and line number",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "file": {
+                    "type": "string",
+                    "description": "File path in demo-repo",
+                },
+                "line": {
+                    "type": "integer",
+                    "description": "1-based line number",
+                },
+            },
+            "required": ["file", "line"],
+        },
+    },
+    {
+        "name": "find_callers",
+        "description": "Find all callers of a symbol name across the demo repository",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "symbol": {
+                    "type": "string",
+                    "description": "Function or method name to search callers for",
+                }
+            },
+            "required": ["symbol"],
+        },
+    },
 ]
 
 def execute_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
     """Execute a named tool safely with provided keyword arguments."""
+    from brain.wiki import get_wiki
+    from brain.codemap import enclosing_symbol, find_callers, find_callees
+
     tools = {
         "list_dir": list_dir,
         "read_file_range": read_file_range,
         "search_text": search_text,
         "git_log": git_log,
         "git_diff": git_diff,
+        "get_wiki": lambda module="": {"wiki": get_wiki(module)},
+        "enclosing_symbol": enclosing_symbol,
+        "find_callers": lambda symbol="": {"callers": find_callers(symbol)},
+        "find_callees": lambda symbol="": {"callees": find_callees(symbol)},
     }
     func = tools.get(name)
     if not func:
         return {"error": f"Unknown tool: '{name}'"}
     try:
-        return func(**args)
+        res = func(**args)
+        if isinstance(res, dict):
+            return res
+        return {"result": res}
     except SandboxViolationError as sve:
         return {"error": f"Sandbox violation: {str(sve)}"}
     except TypeError as te:
