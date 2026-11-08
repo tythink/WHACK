@@ -1,0 +1,15 @@
+name: whack-brain
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - openai
+  - pillow
+  - httpx
+  - pydantic
+  - fastapi
+  - uvicorn
+  - pytest
+  - pip:
+      - google-genai

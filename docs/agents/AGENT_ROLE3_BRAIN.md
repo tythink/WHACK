@@ -72,3 +72,55 @@ conda env export --no-builds > environment-brain.yml
 ```bash
 ./tools/board wait @brain-lead
 ```
+
+---
+
+## 6. Diagnosis Request & Spatial Attention Contract (Proposed Extension)
+
+### 6.1 Diagnosis Request Schema (`/diagnose`)
+```json
+{
+  "terminalOutput": "string (optional): recent terminal logs or test failures",
+  "editorState": {
+    "activeFile": "string (optional): currently active file in IDE",
+    "cursorLine": "int (optional): current cursor line number",
+    "selection": "string (optional): highlighted text snippet"
+  },
+  "attemptLog": "list of past actions or shell runs (optional)",
+  "screenshot": "base64 JPEG/PNG string (optional)",
+  "gazePoint": [1420, 850],
+  "cursorScreenPos": [1400, 840],
+  "caretScreenPos": [920, 410],
+  "screenWidth": 1920,
+  "screenHeight": 1080
+}
+```
+
+### 6.2 Proposed Spatial Extension Fields
+All spatial fields are optional and independently nullable. If omitted, Brain functions purely on diff, terminal output, and code map:
+- `gazePoint`: `[x, y]` raw screen pixel coordinates of user eye gaze.
+- `cursorScreenPos`: `[x, y]` raw screen pixel coordinates of the mouse cursor.
+- `caretScreenPos`: `[x, y]` raw screen pixel coordinates of the active text insertion caret.
+- `screenWidth`: `int` screen pixel width for the coordinate space.
+- `screenHeight`: `int` screen pixel height for the coordinate space.
+
+### 6.3 Gemini Spatial Coordinate Normalization Convention
+Before forwarding coordinates to Gemini:
+1. Coordinates are mapped to Gemini's native **0-1000 normalized `[y, x]` integer scale**.
+2. Normalization denominator is the **ACTUAL pixel dimensions of the captured screenshot image**, not reported `screenWidth`/`screenHeight`, protecting against OS DPI scaling discrepancies (e.g. 125%/150% scaling on Windows single-display projector mirroring).
+3. Gemini receives spatial attention hints as structured JSON:
+   ```json
+   {
+     "caret": [410, 920],
+     "cursor": [840, 1400],
+     "gaze": [850, 1420]
+   }
+   ```
+
+### 6.4 Spatial Trust Hierarchy
+The Brain prompt instructs Gemini with a strict spatial trust hierarchy:
+1. **Caret Position (Highest Trust)**: Exact text insertion point where the developer is actively typing. Strongest spatial signal.
+2. **Cursor Position (High Trust)**: Mouse location, active selection, or hovered symbol. Reliable indicator of current interaction.
+3. **Gaze Tracking (Weaker, Noisy Signal)**: Developers look away when confused or thinking (e.g. at documentation, logs, or empty space). Gaze is only used when it agrees with or complements caret/cursor/diff (e.g. pointing to a specific terminal line or side panel). Gaze must **never override a clear diff-and-error diagnosis**.
+4. **Coherence Audit**: If gaze diverges from cursor/caret by >200 normalized units (~20% screen width/height), the execution trace audits whether the model appropriately discounted gaze in favor of diff evidence.
+
