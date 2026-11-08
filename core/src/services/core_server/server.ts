@@ -1,12 +1,15 @@
 import http, { IncomingMessage, ServerResponse } from "http";
 import {
+  ChatRequest,
+  CodeCitation,
   DiagnosisRequest,
   DiagnosisResponse,
   HintLevel,
+  SuggestedFix,
   normalizeFeedbackPayload,
   normalizeIncomingEvent,
 } from "../../contracts";
-import { runDiagnosis } from "./brainBridge";
+import { runBrainChat, runDiagnosis } from "./brainBridge";
 import { FusionEngine } from "./fusionEngine";
 import { EventRingBuffer } from "./ringBuffer";
 import { WsHub } from "./wsHub";
@@ -138,6 +141,9 @@ export function createCoreServer(capacity = 100) {
               payloadObj.hintLevel === "full_explanation"
                 ? payloadObj.hintLevel
                 : "hint",
+            reasons: Array.isArray(payloadObj.reasons)
+              ? (payloadObj.reasons as string[])
+              : undefined,
             confidence:
               typeof payloadObj.confidence === "number"
                 ? payloadObj.confidence
@@ -145,6 +151,14 @@ export function createCoreServer(capacity = 100) {
             explanation:
               typeof payloadObj.explanation === "string"
                 ? payloadObj.explanation
+                : undefined,
+            citations: Array.isArray(payloadObj.citations)
+              ? (payloadObj.citations as CodeCitation[])
+              : undefined,
+            suggestedFix:
+              payloadObj.suggestedFix &&
+              typeof payloadObj.suggestedFix === "object"
+                ? (payloadObj.suggestedFix as SuggestedFix)
                 : undefined,
           };
 
@@ -239,8 +253,12 @@ export function createCoreServer(capacity = 100) {
             typeof body.screenshotPath === "string"
               ? body.screenshotPath
               : undefined,
-          editorState: snap.latestEditor,
-          terminalState: snap.latestTerminal,
+          editorState:
+            (body.editorState as DiagnosisRequest["editorState"]) ??
+            snap.latestEditor,
+          terminalState:
+            (body.terminalState as DiagnosisRequest["terminalState"]) ??
+            snap.latestTerminal,
           latestFace: snap.latestFace,
           latestEditor: snap.latestEditor,
           latestTerminal: snap.latestTerminal,
@@ -255,7 +273,25 @@ export function createCoreServer(capacity = 100) {
         return;
       }
 
-      // 5. User Feedback (`POST /feedback`)
+      // 5. Follow-up Brain Chat (`POST /chat`)
+      if (method === "POST" && pathname === "/chat") {
+        let body: ChatRequest;
+        try {
+          body = ((await readJsonBody(req)) || { message: "" }) as ChatRequest;
+        } catch {
+          sendJson(res, 400, { ok: false, error: "Invalid JSON body" });
+          return;
+        }
+
+        const chatRes = await runBrainChat(body);
+        sendJson(res, 200, {
+          ok: true,
+          ...chatRes,
+        });
+        return;
+      }
+
+      // 6. User Feedback (`POST /feedback`)
       if (method === "POST" && pathname === "/feedback") {
         let body: unknown;
         try {
