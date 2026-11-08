@@ -229,50 +229,100 @@ def evaluate_spatial_coherence(
             f"Outcome: {outcome}."
         )
 
-def get_real_mouse_position() -> Tuple[int, int]:
-    """Read real mouse cursor position on Windows (GetCursorPos), macOS (CoreGraphics), or via pyautogui."""
-    # 1. Try pyautogui if installed
+def get_real_mouse_position(return_debug: bool = False) -> Union[Tuple[int, int], Tuple[Tuple[int, int], Dict[str, Any]]]:
+    """Read real mouse cursor position on Windows (GetCursorPos), macOS (CoreGraphics), or via pyautogui.
+    
+    Raises a RuntimeError if the OS call fails rather than silently returning (0, 0).
+    If return_debug is True, returns ((x, y), debug_dict).
+    """
+    # 1. Windows via native ctypes GetCursorPos
+    if sys.platform.startswith("win"):
+        import ctypes
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
+
+        class POINT(ctypes.Structure):
+            _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+            def __repr__(self) -> str:
+                return f"POINT(x={self.x}, y={self.y})"
+
+        pt = POINT()
+        user32 = ctypes.windll.user32
+        user32.GetCursorPos.argtypes = [ctypes.POINTER(POINT)]
+        user32.GetCursorPos.restype = ctypes.c_int
+
+        ret = user32.GetCursorPos(ctypes.byref(pt))
+        last_err = ctypes.GetLastError() if ret == 0 else 0
+        debug_info = {
+            "platform": sys.platform,
+            "raw_ret": ret,
+            "point_struct": f"POINT(x={pt.x}, y={pt.y})",
+            "point_x": int(pt.x),
+            "point_y": int(pt.y),
+            "last_error": last_err,
+        }
+
+        if ret == 0:
+            raise RuntimeError(
+                f"Windows GetCursorPos failed (return code={ret}, GetLastError={last_err}). "
+                f"Struct contents: {debug_info['point_struct']}"
+            )
+
+        pos = (int(pt.x), int(pt.y))
+        if return_debug:
+            return pos, debug_info
+        return pos
+
+    # 2. macOS via CoreGraphics
+    if sys.platform == "darwin":
+        import ctypes
+        import ctypes.util
+        cg_path = ctypes.util.find_library("CoreGraphics")
+        if not cg_path:
+            raise RuntimeError("CoreGraphics library not found on macOS")
+        cg = ctypes.cdll.LoadLibrary(cg_path)
+
+        class CGPoint(ctypes.Structure):
+            _fields_ = [("x", ctypes.c_double), ("y", ctypes.c_double)]
+
+        cg.CGEventCreate.restype = ctypes.c_void_p
+        cg.CGEventGetLocation.restype = CGPoint
+        cg.CGEventGetLocation.argtypes = [ctypes.c_void_p]
+        ev = cg.CGEventCreate(None)
+        if not ev:
+            raise RuntimeError("CGEventCreate(None) failed on macOS")
+        pt = cg.CGEventGetLocation(ev)
+        pos = (int(round(pt.x)), int(round(pt.y)))
+        debug_info = {
+            "platform": sys.platform,
+            "raw_ret": ev,
+            "point_struct": f"CGPoint(x={pt.x}, y={pt.y})",
+            "point_x": pos[0],
+            "point_y": pos[1],
+            "last_error": 0,
+        }
+        if return_debug:
+            return pos, debug_info
+        return pos
+
+    # 3. Fallback (e.g. Linux) via pyautogui if installed
     try:
         import pyautogui
-        pos = pyautogui.position()
-        return int(pos[0]), int(pos[1])
-    except Exception:
-        pass
-
-    # 2. Windows via ctypes GetCursorPos
-    if sys.platform.startswith("win"):
-        try:
-            import ctypes
-            try:
-                ctypes.windll.user32.SetProcessDPIAware()
-            except Exception:
-                pass
-            class POINT(ctypes.Structure):
-                _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
-            pt = POINT()
-            if ctypes.windll.user32.GetCursorPos(ctypes.byref(pt)):
-                return int(pt.x), int(pt.y)
-        except Exception:
-            pass
-
-    # 3. macOS via CoreGraphics
-    if sys.platform == "darwin":
-        try:
-            import ctypes
-            import ctypes.util
-            cg_path = ctypes.util.find_library("CoreGraphics")
-            if cg_path:
-                cg = ctypes.cdll.LoadLibrary(cg_path)
-                class CGPoint(ctypes.Structure):
-                    _fields_ = [("x", ctypes.c_double), ("y", ctypes.c_double)]
-                cg.CGEventCreate.restype = ctypes.c_void_p
-                cg.CGEventGetLocation.restype = CGPoint
-                cg.CGEventGetLocation.argtypes = [ctypes.c_void_p]
-                ev = cg.CGEventCreate(None)
-                if ev:
-                    pt = cg.CGEventGetLocation(ev)
-                    return int(round(pt.x)), int(round(pt.y))
-        except Exception:
-            pass
-
-    return (0, 0)
+        pos_p = pyautogui.position()
+        pos = (int(pos_p[0]), int(pos_p[1]))
+        debug_info = {
+            "platform": sys.platform,
+            "raw_ret": 1,
+            "point_struct": f"Position(x={pos[0]}, y={pos[1]})",
+            "point_x": pos[0],
+            "point_y": pos[1],
+            "last_error": 0,
+        }
+        if return_debug:
+            return pos, debug_info
+        return pos
+    except Exception as e:
+        raise RuntimeError(f"Unable to get mouse position on {sys.platform}: {e}")

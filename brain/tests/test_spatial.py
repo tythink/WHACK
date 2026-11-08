@@ -6,6 +6,7 @@ from brain.screenshot import (
     normalize_spatial_point,
     normalize_request_spatial_points,
     evaluate_spatial_coherence,
+    get_real_mouse_position,
     SPATIAL_DISTANCE_THRESHOLD,
 )
 
@@ -79,3 +80,50 @@ def test_spatial_coherence_evaluation():
     note_far = evaluate_spatial_coherence(points_far, model_explanation="The slice bounds are wrong in utils.py.")
     assert "disagreed" in note_far
     assert "adhered to diff/error" in note_far
+
+
+def test_get_real_mouse_position_windows_success(monkeypatch):
+    import sys
+    import ctypes
+    monkeypatch.setattr(sys, "platform", "win32")
+
+    def mock_get_cursor_pos(byref_pt):
+        # Access the underlying structure from byref/pointer
+        pt = byref_pt._obj
+        pt.x = 800
+        pt.y = 600
+        return 1
+
+    monkeypatch.setattr(ctypes.windll.user32, "GetCursorPos", mock_get_cursor_pos)
+
+    # Standard call
+    pos = get_real_mouse_position()
+    assert pos == (800, 600)
+
+    # Call with return_debug=True
+    pos, debug_info = get_real_mouse_position(return_debug=True)
+    assert pos == (800, 600)
+    assert debug_info["raw_ret"] == 1
+    assert debug_info["point_x"] == 800
+    assert debug_info["point_y"] == 600
+    assert "POINT(x=800, y=600)" in debug_info["point_struct"]
+
+
+def test_get_real_mouse_position_windows_failure_raises(monkeypatch):
+    import sys
+    import ctypes
+    monkeypatch.setattr(sys, "platform", "win32")
+
+    def mock_get_cursor_pos_fail(byref_pt):
+        return 0
+
+    monkeypatch.setattr(ctypes.windll.user32, "GetCursorPos", mock_get_cursor_pos_fail)
+    monkeypatch.setattr(ctypes, "GetLastError", lambda: 5)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        get_real_mouse_position()
+
+    err_msg = str(exc_info.value)
+    assert "Windows GetCursorPos failed" in err_msg
+    assert "return code=0" in err_msg
+    assert "GetLastError=5" in err_msg

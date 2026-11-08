@@ -10,6 +10,7 @@ and prints both raw and normalized values.
 import os
 import sys
 from pathlib import Path
+from typing import Optional, Dict, Any, Union
 from PIL import Image, ImageDraw, ImageFont
 
 # Ensure brain module is on sys.path
@@ -19,6 +20,8 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from brain.screenshot import get_real_mouse_position
+
+Optional_Path = Optional[Union[str, Path]]
 
 
 def verify_scaling(output_path: Optional_Path = None) -> dict:
@@ -33,8 +36,14 @@ def verify_scaling(output_path: Optional_Path = None) -> dict:
         except Exception as e:
             dpi_aware = False
 
-    # 2. Get real mouse position
-    raw_x, raw_y = get_real_mouse_position()
+    # 2. Get real mouse position with debug info
+    ctypes_debug = None
+    try:
+        mouse_res = get_real_mouse_position(return_debug=True)
+        (raw_x, raw_y), ctypes_debug = mouse_res
+    except Exception as exc:
+        print(f"\n[ERROR] Failed to query mouse position: {exc}\n")
+        raise
 
     # 3. Capture screenshot
     captured_img = None
@@ -150,6 +159,9 @@ def verify_scaling(output_path: Optional_Path = None) -> dict:
         "dpi_aware": dpi_aware,
         "capture_source": capture_source,
         "raw_mouse": (raw_x, raw_y),
+        "ctypes_return": ctypes_debug.get("raw_ret") if ctypes_debug else None,
+        "point_struct": ctypes_debug.get("point_struct") if ctypes_debug else None,
+        "ctypes_debug": ctypes_debug,
         "screenshot_dimensions": (width, height),
         "gemini_normalized_yx": [norm_y, norm_x],
         "projected_pixel_xy": (marker_x, marker_y),
@@ -159,7 +171,6 @@ def verify_scaling(output_path: Optional_Path = None) -> dict:
 
 
 if __name__ == "__main__":
-    Optional_Path = Any = object
     res = verify_scaling()
     print("=" * 60)
     print("WHACK BRAIN - SCALING & SPATIAL VERIFICATION")
@@ -168,6 +179,10 @@ if __name__ == "__main__":
     print(f"Capture Source:        {res['capture_source']}")
     print(f"Screenshot Resolution: {res['screenshot_dimensions'][0]} x {res['screenshot_dimensions'][1]} px")
     print(f"Raw Mouse Position:    X={res['raw_mouse'][0]}, Y={res['raw_mouse'][1]}")
+    if res.get("ctypes_return") is not None:
+        print(f"ctypes Return Value:   {res['ctypes_return']}")
+    if res.get("point_struct") is not None:
+        print(f"POINT Struct Contents: {res['point_struct']}")
     print(f"Gemini Normalized:     [y, x] = {res['gemini_normalized_yx']} (range: 0-1000)")
     print(f"Projected Marker:      X={res['projected_pixel_xy'][0]}, Y={res['projected_pixel_xy'][1]} px")
     print(f"Output Marker Image:   {res['output_path']}")
