@@ -1,0 +1,117 @@
+{
+  "name": "whack-vscode",
+  "displayName": "WHACK — Passive Confusion & Brain Assistant",
+  "description": "Stays small and passive in the VS Code Status Bar while coding; when WHACK Brain returns a diagnosis, highlights offending lines in the editor and opens a right-side Diagnosis + Chat panel.",
+  "version": "0.1.0",
+  "publisher": "whack-team",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other",
+    "Debuggers",
+    "Programming Languages"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./runtime/extension.js",
+  "scripts": {
+    "build": "tsc -p ./tsconfig.json",
+    "typecheck": "tsc -p ./tsconfig.json --noEmit"
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "whack.simulateBrain",
+        "title": "WHACK: Simulate Brain Result (Highlight Code + Open Right Panel)",
+        "icon": "$(beaker)"
+      },
+      {
+        "command": "whack.simulateActiveFile",
+        "title": "WHACK: Simulate Brain Result on Currently Active File",
+        "icon": "$(sparkle)"
+      },
+      {
+        "command": "whack.triggerDiagnose",
+        "title": "WHACK: Trigger Brain Diagnosis Now (Ctrl+Shift+K)",
+        "icon": "$(pulse)"
+      },
+      {
+        "command": "whack.togglePanel",
+        "title": "WHACK: Toggle Right-Side Diagnosis & Chat Panel",
+        "icon": "$(layout-sidebar-right)"
+      },
+      {
+        "command": "whack.previewDiff",
+        "title": "WHACK: Preview Suggested Fix Diff"
+      },
+      {
+        "command": "whack.applyFix",
+        "title": "WHACK: Apply Suggested Fix"
+      },
+      {
+        "command": "whack.jumpToCitation",
+        "title": "WHACK: Jump to Cited Code Location"
+      },
+      {
+        "command": "whack.focusChat",
+        "title": "WHACK: Ask Follow-Up in Right-Side Chat"
+      },
+      {
+        "command": "whack.dismiss",
+        "title": "WHACK: Dismiss Highlight & Return to Passive Mode"
+      },
+      {
+        "command": "whack.statusMenu",
+        "title": "WHACK: Quick Actions Menu"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "whack.triggerDiagnose",
+        "key": "ctrl+shift+k",
+        "mac": "cmd+shift+k"
+      },
+      {
+        "command": "whack.simulateBrain",
+        "key": "ctrl+alt+s",
+        "mac": "cmd+alt+s"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "whack.simulateBrain",
+          "group": "navigation@99"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "WHACK",
+      "properties": {
+        "whack.coreServerUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:3000",
+          "description": "Local WHACK Core Server URL (embedded fallback starts automatically if not running)."
+        },
+        "whack.brainServerUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:5002",
+          "description": "Role 3 Brain LLM service URL (automatically switches from Mock Brain to Live Brain once online)."
+        },
+        "whack.showSimulateStatusBarButton": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show the 1-click 'Simulate Brain' test button in the bottom Status Bar."
+        }
+      }
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.5.4"
+  }
+}
