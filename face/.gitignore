@@ -1,0 +1,6 @@
+# Auto-downloaded MediaPipe task bundles (fetched on startup by model_loader.py)
+models/*.task
+models/*.part
+
+# Per-user local webcam & screen calibration data
+calibration_profile.json
