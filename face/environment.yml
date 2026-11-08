@@ -1,0 +1,13 @@
+name: whack-face
+channels:
+  - defaults
+dependencies:
+  - python=3.10
+  - pip
+  - tk
+  - pip:
+      - mediapipe>=0.10.14
+      - opencv-python>=4.9.0
+      - numpy>=1.24.0,<2.3.0
+      - pillow>=10.0.0
+      - requests>=2.31.0
