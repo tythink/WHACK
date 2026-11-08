@@ -62,18 +62,32 @@ conda env export --no-builds > environment-face.yml
 - **Upper-Body & Hand-to-Face Gestures**: MediaPipe Pose + Hand landmarks (`head_scratch`, `chin_rest`, `facepalm_or_rub`, `eye_rub`, `hands_thrown_up`, `clenched_fist`, `thumbs_up`, `mouth_cover`, `lean_in`, `shoulder_slump`, `shoulder_shrug`, `head_tilt`, `head_shake`, `head_nod`) fused via Noisy-OR with facial AU blendshapes, guarded against talking and hand occlusion.
 - **6-DOF Head-Invariant 3D Gaze Tracking**: MediaPipe 478-landmark iris + dark-pupil refinement + 4×4 metric head transformation matrix + tilted-screen VOR calibration outputting `(screen_x_px, screen_y_px)` and zone (`screen_editor`, `screen_terminal`, `looking_away`, `eyes_closed`).
 
-### Stream B — Editor, Terminal & Attempt-Log Signals (`signals/`)
-- **VS Code Extension Telemetry**: Tracks document edits (`isUndo`, `isRedo`), cursor idle dwell (`cursorDwellMs`), active file switching / ping-pong edits (`activeFile`), and error/warning diagnostic counts (`diagnosticsCount`).
-- **Terminal Execution Telemetry**: Uses VS Code shell integration API (with shell wrapper / hook fallback in `tools/terminal_wrapper/` saving tail output to a temp file) to capture `command`, `exitCode`, `durationMs`, `errorHash`, and `tailOutput`.
-- **Attempt-Log Summarizer**: Maintains a rolling 10-minute behavioral digest for the Brain (e.g., *"Last 10 mins: ran pytest 4x failing with same error; edited utils.py 6x; 3 undos."*).
-- **Last-Known-Good Git Tracker & Secret Redaction**: Snapshots git state hash whenever a test/run exits with code `0`, computes clean working-tree diffs since last-known-good, and strips secrets/API tokens before emitting payloads.
+### Stream B — OS Cursor, Text Caret (`|`), Editor, Terminal & Attempt-Log Signals (`signals/`)
+- **3-Coordinate Spatial & Idle/Dwell Telemetry**:
+  1. **Mouse Cursor Coordinate `(mouse_x_px, mouse_y_px)`**: Live screen position, `mouse_dwell_ms`, and frustration wiggle detection.
+  2. **Keyboard / Text Cursor (Caret `|`) Coordinate `(caret_x_px, caret_y_px)`**: Live vertical text-bar screen position (via Win32 `GetGUIThreadInfo` + MSAA `OBJID_CARET` / editor APIs), `keyboard_dwell_ms`, Undo/Backspace bursts, and same-line erase oscillation.
+  3. **Eye-Tracking Gaze Coordinate `(gaze_x_px, gaze_y_px)`**: Paired from `face/` (`screen_x_px`, `screen_y_px`, `fixation_ms`, `zone`).
+- **VS Code / Terminal / Git Telemetry**: Tracks active file switching / ping-pong edits, diagnostics, terminal `exitCode` / `errorHash` / `tailOutput`, rolling 10-minute **Attempt-Log Summarizer**, and **Last-Known-Good Git Tracker** (with secret redaction).
 
-### Stream C — Unified Multimodal Decision Fusion Engine
-Owning both `face/` and `signals/` enables tight spatial-behavioral correlation:
-1. **High behavior score alone** (e.g., repeated identical terminal `errorHash`, rapid undo bursts, ping-pong file switches) $\rightarrow$ **Nudge**.
-2. **Sustained confusion/frustration + on-target gaze (`screen_editor` / `screen_terminal`) + moderate behavior** (e.g., dwelling on a file with diagnostics or staring at a failed terminal traceback) $\rightarrow$ **High-confidence Nudge**.
-3. **Face/body confusion sustained high alone** (while looking at screen, no errors yet) $\rightarrow$ **Soft nudge only**.
-4. **False-positive suppression & cooldown**: Suppress triggers when `talking == true` or `gaze.zone == "looking_away"`, and enforce a **3-minute post-dismissal cooldown**.
+### Stream C — Unified Signal + Facial Status Engine & Active Role 3 Brain Caller
+- **Active Caller Architecture (Role 1+2 $\rightarrow$ Role 3 Brain)**:
+  - **Role 1+2 (`face/` + `signals/`) is the ACTIVE side** that evaluates combined facial + behavioral signals continuously to determine the unified **User Status** and **actively invokes Role 3 (`@brain-lead`)** (via direct function/callback invocation or HTTP POST to Brain `/diagnose` on `:5002`, while Role 3 waits passively to be called).
+  - Every active call to Role 3 Brain passes **4 core inputs** (3 screen coordinates + the 6 emotions):
+    1. **`mouse_cursor`**: `{ "x": mouse_x_px, "y": mouse_y_px }` (coordinate of the mouse cursor)
+    2. **`keyboard_cursor`**: `{ "x": caret_x_px, "y": caret_y_px }` (coordinate of the keyboard text cursor / vertical bar `|`)
+    3. **`eye_gaze`**: `{ "x": gaze_x_px, "y": gaze_y_px }` (coordinate of the 3D eye-tracking point on screen)
+    4. **`emotions`** *(all 6 calibrated emotion scores `0.0–1.0`)*: `{ "confused", "frustrated", "surprised", "flow", "fatigued", "delighted" }`
+    *(alongside the fused `user_status`, `confidence`, `reasons`, and `attemptLog` context).*
+  - **Strict AFK Rule**: If `user_status == "afk_away"` (sustained missing face $\ge 3\text{s}$ or sustained head turned completely away $\ge 4\text{s}$ while cursors are idle), **never call the main Brain**.
+- **Combined Signal + Facial User Status Rules**:
+  1. **`stuck_frozen_at_caret` $\rightarrow$ Active Brain Call**: Keyboard cursor `|` & mouse cursor idle/dwell sustained while `eye_gaze` stays pinned near `keyboard_cursor` (or error region) **and** facial/body affect shows `confused` / `frustrated` (`head_scratch`, `chin_rest`), or severe prolonged freeze on code.
+  2. **`stuck_erase_thrash` / `stuck_attention_split` / `frustrated_blocked` $\rightarrow$ Active Brain Call**: Rapid Undo/Backspace erase-loops on the `keyboard_cursor` line, `eye_gaze` / `mouse_cursor` ping-ponging far from a parked `keyboard_cursor`, mouse frustration wiggle, or repeated terminal `errorHash` failures combined with facial/body distress.
+  3. **Anti-Annoyance & Context Disambiguation Guards (Do NOT Call Brain)**:
+     - **`afk_away`**: Mouse & keyboard cursor idle **+** (`looking_away` or no face detected) $\rightarrow$ user is away from desk; pause timers.
+     - **`calm_reading`**: Mouse & keyboard cursor idle **+** `flow` facial state **+** `eye_gaze` smoothly scanning lines $\rightarrow$ reading docs/code; suppress call.
+     - **`focused_flow`**: Steady `keyboard_cursor` progression + `eye_gaze` near `keyboard_cursor` + `flow` $\rightarrow$ Do-Not-Disturb lock.
+     - **`talking_suppressed`**: `talking == true` $\rightarrow$ collaborating/speaking; suppress call.
+     - **Post-call / post-dismissal cooldown** (e.g., 45s min interval / 3-min dismissal cooldown) & **`eureka_resolved`** reset on `delighted` / passing run.
 
 ---
 
