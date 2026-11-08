@@ -1,7 +1,7 @@
 {
   "name": "whack-vscode",
   "displayName": "WHACK — Passive Confusion & Brain Assistant",
-  "description": "Stays small and passive in the VS Code Status Bar while coding; when WHACK Brain returns a diagnosis, highlights offending lines in the editor and opens a right-side Diagnosis + Chat panel.",
+  "description": "Stays small and passive in the VS Code Status Bar while coding; when WHACK Brain returns a diagnosis, plays a subtle chime + VS Code notification toast, highlights offending lines in the editor, and opens a right-side Diagnosis + Chat panel.",
   "version": "0.1.0",
   "publisher": "whack-team",
   "license": "MIT",
@@ -66,6 +66,10 @@
       {
         "command": "whack.statusMenu",
         "title": "WHACK: Quick Actions Menu"
+      },
+      {
+        "command": "whack.toggleSound",
+        "title": "WHACK: Toggle Brain Notification Sound (ON/OFF)"
       }
     ],
     "keybindings": [
@@ -105,6 +109,16 @@
           "type": "boolean",
           "default": true,
           "description": "Show the 1-click 'Simulate Brain' test button in the bottom Status Bar."
+        },
+        "whack.enableNotificationToast": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show an interactive VS Code notification toast (Apply Fix / Preview Diff / Jump to Line / Dismiss) when WHACK Brain returns a diagnosis."
+        },
+        "whack.enableNotificationSound": {
+          "type": "boolean",
+          "default": true,
+          "description": "Play a subtle two-note notification chime when WHACK Brain returns a diagnosis or applies a fix."
         }
       }
     }

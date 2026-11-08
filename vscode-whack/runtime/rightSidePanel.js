@@ -42,7 +42,7 @@ const vscode = __importStar(require("vscode"));
  * Behaviour:
  * - Stays 100% CLOSED during normal passive coding so your editor keeps full screen width.
  * - Slides open on the right-hand side automatically when the Brain LLM returns a result
- *   (or when you click `Simulate Brain` / `Ctrl+Shift+K`).
+ *   (or when you click `Simulate Brain` / `Ctrl+Shift+K`), playing a subtle harmonic chime.
  * - Collapses & disposes cleanly when you click `Dismiss`.
  */
 class WhackRightSidePanel {
@@ -52,6 +52,8 @@ class WhackRightSidePanel {
     currentSourceLabel = "Mock Brain";
     brainOnline = false;
     hasFix = false;
+    soundEnabled = true;
+    pendingChime = null;
     chatHistory = [];
     constructor(handlers) {
         this.handlers = handlers;
@@ -59,11 +61,31 @@ class WhackRightSidePanel {
     get isVisible() {
         return Boolean(this.panel && this.panel.visible);
     }
+    get isSoundEnabled() {
+        return this.soundEnabled;
+    }
+    setSoundEnabled(enabled) {
+        this.soundEnabled = enabled;
+        this.pushStateToWebview();
+    }
+    playChime(kind) {
+        if (!this.soundEnabled)
+            return;
+        if (this.panel) {
+            this.panel.webview.postMessage({ type: "play_chime", kind });
+        }
+        else {
+            this.pendingChime = kind;
+        }
+    }
     showDiagnosis(diagnosis, options) {
         this.currentDiagnosis = diagnosis;
         this.currentSourceLabel = options.sourceLabel;
         this.brainOnline = options.brainOnline;
         this.hasFix = options.hasFix;
+        if (options.playSound && this.soundEnabled) {
+            this.pendingChime = diagnosis.uncertain ? "uncertain" : "diagnosis";
+        }
         if (options.resetChat) {
             this.chatHistory = [
                 {
@@ -143,6 +165,11 @@ class WhackRightSidePanel {
                 case "dismiss":
                     await this.handlers.onDismiss();
                     break;
+                case "toggle_sound":
+                    this.soundEnabled = Boolean(msg.enabled);
+                    this.handlers.onToggleSound?.(this.soundEnabled);
+                    this.pushStateToWebview();
+                    break;
                 case "simulate":
                     await this.handlers.onSimulateScenario(msg.scenario || "sliding_window");
                     break;
@@ -165,6 +192,8 @@ class WhackRightSidePanel {
             ...c,
             shortFile: path.basename(c.file),
         }));
+        const chimeToPlay = this.pendingChime;
+        this.pendingChime = null;
         this.panel.webview.postMessage({
             type: "state_sync",
             diagnosis: d,
@@ -172,6 +201,8 @@ class WhackRightSidePanel {
             sourceLabel: this.currentSourceLabel,
             brainOnline: this.brainOnline,
             hasFix: this.hasFix,
+            soundEnabled: this.soundEnabled,
+            chime: chimeToPlay,
             chatHistory: this.chatHistory,
         });
     }
@@ -309,6 +340,10 @@ class WhackRightSidePanel {
       color: #fff;
     }
 
+    .btn-top.muted {
+      opacity: 0.65;
+    }
+
     /* 2. Scrollable Diagnosis + Places to Correct */
     .diagnosis-scroll {
       flex: 1 1 54%;
@@ -362,6 +397,11 @@ class WhackRightSidePanel {
       color: #ffffff;
     }
 
+    @keyframes cardPulse {
+      0% { box-shadow: 0 0 0 0 rgba(242, 85, 51, 0.55); border-color: var(--coral); }
+      100% { box-shadow: 0 0 0 10px rgba(242, 85, 51, 0); border-color: var(--border); }
+    }
+
     .card {
       background: var(--surface);
       border: 1px solid var(--border);
@@ -370,6 +410,10 @@ class WhackRightSidePanel {
       display: flex;
       flex-direction: column;
       gap: 8px;
+    }
+
+    .card.pulse-alert {
+      animation: cardPulse 0.85s ease-out 1;
     }
 
     .quip {
@@ -610,6 +654,7 @@ class WhackRightSidePanel {
       <span id="modePill" class="mode-pill">Mock Brain</span>
     </div>
     <div class="topbar-actions">
+      <button id="btnSound" class="btn-top" title="Toggle Brain notification chime sound (click to test chime)">🔔 Sound</button>
       <select id="simSelect" class="sim-select" title="Test simulated Brain scenarios before Role 3 Brain is online">
         <option value="" selected disabled>🧪 Simulate...</option>
         <option value="sliding_window">Planted Bug (utils.py)</option>
@@ -630,7 +675,7 @@ class WhackRightSidePanel {
       <button class="seg-btn" data-level="full_explanation">3 · Full Fix</button>
     </div>
 
-    <div class="card">
+    <div id="diagCard" class="card">
       <div id="quipBox" class="quip">Waiting for Brain trigger...</div>
       <div id="mdBody" class="md-body">Click <strong>🧪 Simulate...</strong> above or press <code>Ctrl+Alt+S</code> to test editor line highlighting and right-side diagnosis!</div>
       <div id="fixBar" class="fix-bar" style="display: none;">
@@ -671,9 +716,11 @@ class WhackRightSidePanel {
 
     const sevBadge = document.getElementById("sevBadge");
     const modePill = document.getElementById("modePill");
+    const btnSound = document.getElementById("btnSound");
     const simSelect = document.getElementById("simSelect");
     const btnDismiss = document.getElementById("btnDismiss");
     const reasonsRow = document.getElementById("reasonsRow");
+    const diagCard = document.getElementById("diagCard");
     const quipBox = document.getElementById("quipBox");
     const mdBody = document.getElementById("mdBody");
     const fixBar = document.getElementById("fixBar");
@@ -684,6 +731,74 @@ class WhackRightSidePanel {
     const chatInput = document.getElementById("chatInput");
     const btnSend = document.getElementById("btnSend");
     const thinkingLabel = document.getElementById("thinkingLabel");
+
+    let soundEnabled = true;
+    let audioCtx = null;
+
+    function playSynthChime(kind) {
+      if (!soundEnabled) return;
+      try {
+        const AudioCtx = window.AudioContext || window.webkitAudioContext;
+        if (!AudioCtx) return;
+        if (!audioCtx) audioCtx = new AudioCtx();
+        if (audioCtx.state === "suspended") {
+          audioCtx.resume().catch(() => {});
+        }
+        const now = audioCtx.currentTime;
+        const notes =
+          kind === "applied"
+            ? [
+                { f: 523.25, t: 0.0, d: 0.14 },
+                { f: 659.25, t: 0.08, d: 0.16 },
+                { f: 783.99, t: 0.16, d: 0.24 },
+              ]
+            : kind === "uncertain"
+            ? [
+                { f: 440.0, t: 0.0, d: 0.14 },
+                { f: 523.25, t: 0.11, d: 0.20 },
+              ]
+            : [
+                { f: 587.33, t: 0.0, d: 0.15 },
+                { f: 880.0, t: 0.10, d: 0.24 },
+              ];
+
+        notes.forEach((n) => {
+          const osc = audioCtx.createOscillator();
+          const gain = audioCtx.createGain();
+          osc.type = "sine";
+          osc.frequency.setValueAtTime(n.f, now + n.t);
+          gain.gain.setValueAtTime(0.001, now + n.t);
+          gain.gain.exponentialRampToValueAtTime(0.16, now + n.t + 0.02);
+          gain.gain.exponentialRampToValueAtTime(0.0008, now + n.t + n.d);
+          osc.connect(gain);
+          gain.connect(audioCtx.destination);
+          osc.start(now + n.t);
+          osc.stop(now + n.t + n.d + 0.02);
+        });
+      } catch (e) {
+        // Ignore WebAudio restrictions
+      }
+    }
+
+    function flashCardPulse() {
+      diagCard.classList.remove("pulse-alert");
+      void diagCard.offsetWidth;
+      diagCard.classList.add("pulse-alert");
+    }
+
+    function updateSoundButtonUI() {
+      btnSound.textContent = soundEnabled ? "🔔 Sound" : "🔕 Muted";
+      btnSound.classList.toggle("muted", !soundEnabled);
+    }
+
+    btnSound.addEventListener("click", () => {
+      soundEnabled = !soundEnabled;
+      updateSoundButtonUI();
+      if (soundEnabled) {
+        playSynthChime("diagnosis");
+      }
+      vscode.postMessage({ type: "toggle_sound", enabled: soundEnabled });
+    });
 
     function escapeHtml(str) {
       return String(str || "")
@@ -749,6 +864,12 @@ class WhackRightSidePanel {
       const msg = event.data;
       if (!msg) return;
 
+      if (msg.type === "play_chime") {
+        playSynthChime(msg.kind || "diagnosis");
+        flashCardPulse();
+        return;
+      }
+
       if (msg.type === "chat_thinking") {
         thinkingLabel.style.display = msg.thinking ? "inline" : "none";
         return;
@@ -760,6 +881,15 @@ class WhackRightSidePanel {
       }
 
       if (msg.type === "state_sync") {
+        if (typeof msg.soundEnabled === "boolean") {
+          soundEnabled = msg.soundEnabled;
+          updateSoundButtonUI();
+        }
+        if (msg.chime) {
+          playSynthChime(msg.chime);
+          flashCardPulse();
+        }
+
         const d = msg.diagnosis;
         modePill.textContent = msg.brainOnline ? "Live Brain :5002" : "Mock Brain Ready";
         modePill.className = "mode-pill" + (msg.brainOnline ? " live" : "");
