@@ -1,4 +1,6 @@
 import {
+  ChatRequest,
+  ChatResponse,
   DiagnosisRequest,
   DiagnosisResponse,
   HintLevel,
@@ -7,6 +9,9 @@ import { WsHub } from "./wsHub";
 
 const BRAIN_SERVICE_URL =
   process.env.BRAIN_SERVICE_URL || "http://localhost:5002/diagnose";
+const BRAIN_CHAT_URL =
+  process.env.BRAIN_CHAT_URL ||
+  BRAIN_SERVICE_URL.replace(/\/diagnose\/?$/, "/chat");
 
 /**
  * Calls Role 3's Brain Service (`http://localhost:5002/diagnose`) if reachable,
@@ -63,6 +68,7 @@ export async function runDiagnosis(
           confidence: data.confidence ?? 0.95,
           explanation: data.explanation,
           citations: data.citations,
+          suggestedFix: data.suggestedFix,
         };
 
         wsHub.broadcast({
@@ -138,4 +144,119 @@ export async function runDiagnosis(
   });
 
   return response;
+}
+
+/**
+ * Follow-up conversational endpoint (`POST /chat`) for the right-side IDE Chatbox.
+ * Tries Role 3's Brain service (`:5002/chat` or `:5002/diagnose`) first and falls back
+ * cleanly to a context-aware Mock Brain reply while Role 3 is still being built.
+ */
+export async function runBrainChat(req: ChatRequest): Promise<ChatResponse> {
+  const question = (req.message || "").trim();
+  const file = req.activeFile || req.latestDiagnosis?.file || "utils.py";
+  const range = req.highlightedLines || req.latestDiagnosis?.lines;
+  const lineTag = range ? `L${range[0]}–${range[1]}` : "highlighted region";
+
+  if (process.env.USE_BRAIN_STUB !== "true") {
+    // 1a. Try dedicated Brain `/chat` endpoint if Role 3 adds one
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 3500);
+      const res = await fetch(BRAIN_CHAT_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(req),
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
+      if (res.ok) {
+        const data = (await res.json()) as Partial<ChatResponse> & {
+          summary?: string;
+          explanation?: string;
+        };
+        const reply =
+          data.reply || data.explanation || data.summary || "Received from Brain.";
+        return {
+          reply,
+          mode: "brain_live",
+          citations: data.citations,
+          suggestedFix: data.suggestedFix,
+        };
+      }
+    } catch {
+      // Fall through to `/diagnose` or mock fallback
+    }
+
+    // 1b. Try Role 3's existing `/diagnose` endpoint with user question embedded in attemptLog
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 3500);
+      const res = await fetch(BRAIN_SERVICE_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          hintLevel: "full_explanation",
+          attemptLog: `Follow-up developer question: "${question}"\nCode snippet (${file} ${lineTag}):\n${req.codeSnippet || ""}`,
+          editorState: {
+            activeFile: file,
+            cursorLine: range ? range[0] : 1,
+            selectionText: req.codeSnippet || undefined,
+          },
+          stream: false,
+        }),
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
+      if (res.ok) {
+        const data = (await res.json()) as Partial<DiagnosisResponse>;
+        const reply = data.explanation
+          ? `${data.summary || ""}\n\n${data.explanation}`.trim()
+          : data.summary || "Checked repository context.";
+        return {
+          reply,
+          mode: "brain_live",
+          citations: data.citations,
+          suggestedFix: data.suggestedFix,
+        };
+      }
+    } catch {
+      // Role 3 Brain offline -> use local Mock Brain reply below
+    }
+  }
+
+  // 2. Context-aware Mock Brain fallback (works right now before Role 3 finishes!)
+  const qLower = question.toLowerCase();
+  const diagSummary = req.latestDiagnosis?.summary || "the highlighted loop boundary";
+
+  if (qLower.includes("hint") || qLower.includes("without") || qLower.includes("spoiler")) {
+    return {
+      mode: "mock_fallback",
+      reply:
+        `**Socratic Hint (\`${file}\` · ${lineTag}):**\n` +
+        `Trace the loop with a tiny input like \`total_items = 5\` and \`window_size = 3\`. ` +
+        `How many valid windows of length 3 fit inside 5 items (indices \`0..3\`, \`1..4\`, \`2..5\`), and what is the last \`start\` index your \`range(...)\` currently produces?`,
+    };
+  }
+
+  if (qLower.includes("edge") || qLower.includes("other") || qLower.includes("test")) {
+    return {
+      mode: "mock_fallback",
+      reply:
+        `**Edge Cases to Verify in \`${file}\`:**\n` +
+        `1. **\`window_size > total_items\`**: \`range(0, total_items - window_size + 1)\` safely yields an empty range \`[]\` in Python rather than negative indices.\n` +
+        `2. **\`window_size == total_items\`**: Produces exactly one window \`[(0, total_items)]\`.\n` +
+        `3. **Downstream \`batch_slice\`**: Once \`end\` never exceeds \`len(data)\`, the \`IndexError\` guard in \`batch_slice\` will no longer trip.`,
+    };
+  }
+
+  return {
+    mode: "mock_fallback",
+    reply:
+      `**Mock Brain (\`${file}\` · ${lineTag}):**\n` +
+      `Regarding *"${question || "this issue"}"* — ${diagSummary}\n\n` +
+      (req.codeSnippet
+        ? `In your highlighted code:\n\`\`\`python\n${req.codeSnippet.trim()}\n\`\`\`\n`
+        : "") +
+      `You can click **Preview Diff** to inspect the exact line change side-by-side, or **Apply Fix** to patch \`${file}\` directly (undoable anytime with \`Ctrl+Z\`).`,
+  };
 }

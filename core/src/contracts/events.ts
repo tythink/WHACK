@@ -93,10 +93,22 @@ export interface CodeCitation {
   lines: [number, number];
   snippet?: string;
   note?: string;
+  replacement?: string;
+}
+
+export interface SuggestedFix {
+  file?: string;
+  lines?: [number, number];
+  startLine?: number;
+  endLine?: number;
+  find?: string;
+  oldText?: string;
+  replacement?: string;
+  newText?: string;
 }
 
 /**
- * 7. BRAIN DIAGNOSIS RESPONSE (Returned by Role 3 -> Core Server -> Electron UI)
+ * 7. BRAIN DIAGNOSIS RESPONSE (Returned by Role 3 -> Core Server -> VS Code / Electron UI)
  */
 export interface DiagnosisResponse {
   summary: string;
@@ -109,10 +121,33 @@ export interface DiagnosisResponse {
   confidence?: number;
   explanation?: string;
   citations?: CodeCitation[];
+  suggestedFix?: SuggestedFix;
+}
+
+export interface ChatMessage {
+  role: "user" | "assistant";
+  content: string;
+  timestamp?: number;
+}
+
+export interface ChatRequest {
+  message: string;
+  history?: ChatMessage[];
+  activeFile?: string;
+  highlightedLines?: [number, number];
+  codeSnippet?: string;
+  latestDiagnosis?: Partial<DiagnosisResponse> | null;
+}
+
+export interface ChatResponse {
+  reply: string;
+  mode?: "brain_live" | "mock_fallback";
+  citations?: CodeCitation[];
+  suggestedFix?: SuggestedFix;
 }
 
 /**
- * 8. USER FEEDBACK PAYLOAD (Sent from Electron UI -> `POST /feedback`)
+ * 8. USER FEEDBACK PAYLOAD (Sent from Electron / VS Code UI -> `POST /feedback`)
  */
 export interface FeedbackPayload {
   action: "dismiss" | "not_confused" | "helpful" | "snooze" | "toggle_camera";
@@ -122,7 +157,7 @@ export interface FeedbackPayload {
 }
 
 /**
- * 9. WEBSOCKET MESSAGES (`ws://localhost:3000/ws` -> Electron UI)
+ * 9. WEBSOCKET MESSAGES (`ws://localhost:3000/ws` -> Electron / VS Code UI)
  */
 export type WsMessage =
   | {
