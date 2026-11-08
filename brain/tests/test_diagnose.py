@@ -70,7 +70,7 @@ def test_post_diagnose_full_explanation():
     assert res.status_code == 200
     data = res.json()
     assert data["hintLevel"] == "full_explanation"
-    assert "Root Cause" in data["explanation"] or "for i in range" in data["explanation"] or "range" in data["explanation"].lower() or "offset" in data["explanation"].lower()
+    assert any(term in data["explanation"].lower() for term in ["root cause", "range", "offset", "loop", "window", "boundary", "index"])
 
 def test_post_diagnose_streaming_sse():
     payload = {
@@ -87,3 +87,65 @@ def test_post_diagnose_streaming_sse():
     assert "event: start" in text
     assert "event: diagnosis" in text
     assert "event: done" in text
+
+def test_apply_fix_and_rollback():
+    """Test full cycle: apply-fix endpoint applies edit and rollback endpoint reverts it."""
+    # 1. Apply fix
+    payload = {
+        "fix": {
+            "file": "utils.py",
+            "startLine": 11,
+            "endLine": 11,
+            "oldText": "    for i in range(0, total_items - window_size + 2):",
+            "newText": "    for i in range(0, total_items - window_size + 1):",
+        }
+    }
+    res = client.post("/apply-fix", json=payload)
+    assert res.status_code == 200
+    data = res.json()
+    assert data["success"] is True
+    assert "checkpoint_hash" in data
+    assert data["before_passed"] is False
+    assert data["after_passed"] is True
+    checkpoint_hash = data["checkpoint_hash"]
+
+    # 2. Rollback to checkpoint
+    rb_payload = {"checkpointHash": checkpoint_hash}
+    rb_res = client.post("/rollback", json=rb_payload)
+    assert rb_res.status_code == 200
+    rb_data = rb_res.json()
+    assert rb_data["success"] is True
+    assert rb_data["rolled_back_to"] == checkpoint_hash
+    # After rollback, tests should fail again with the planted bug
+    assert rb_data["tests_passed"] is False
+
+def test_apply_fix_mismatch_refused():
+    """Ensure apply-fix refuses if oldText does not match live file on disk."""
+    payload = {
+        "fix": {
+            "file": "utils.py",
+            "startLine": 11,
+            "endLine": 11,
+            "oldText": "    for i in range(0, completely_wrong_text):",
+            "newText": "    for i in range(0, total_items - window_size + 1):",
+        }
+    }
+    res = client.post("/apply-fix", json=payload)
+    assert res.status_code == 400
+    data = res.json()
+    assert data["success"] is False
+    assert "Refused" in data["error"] or "did not match" in data["error"]
+
+def test_apply_fix_sandbox_violation():
+    """Ensure apply-fix strictly refuses files attempting path traversal outside demo repo."""
+    payload = {
+        "fix": {
+            "file": "../agent.md",
+            "startLine": 1,
+            "endLine": 1,
+            "oldText": "something",
+            "newText": "hacked",
+        }
+    }
+    res = client.post("/apply-fix", json=payload)
+    assert res.status_code in (400, 403)

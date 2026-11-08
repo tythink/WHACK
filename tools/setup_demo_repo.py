@@ -84,18 +84,27 @@ def run_git(cmd, cwd):
         text=True,
     )
     if res.returncode != 0:
-        raise RuntimeError(f"git {' '.join(cmd)} failed:\n{res.stderr.strip()}")
+        err_msg = res.stderr.strip() or res.stdout.strip()
+        raise RuntimeError(f"git {' '.join(cmd)} failed:\n{err_msg}")
     return res.stdout.strip()
+
+def _remove_readonly(func, path, exc):
+    import stat
+    try:
+        os.chmod(path, stat.S_IWRITE)
+        func(path)
+    except Exception:
+        pass
 
 def copy_stage_files(stage_path: Path, target_dir: Path):
     for item in stage_path.iterdir():
         dest = target_dir / item.name
         if item.is_dir():
             if dest.exists():
-                shutil.rmtree(dest)
-            shutil.copytree(item, dest)
+                shutil.rmtree(dest, onexc=_remove_readonly)
+            shutil.copytree(item, dest, copy_function=shutil.copy)
         else:
-            shutil.copy2(item, dest)
+            shutil.copy(item, dest)
 
 def build_repo(target_dir: Path) -> Path:
     target_dir = target_dir.resolve()
@@ -103,7 +112,7 @@ def build_repo(target_dir: Path) -> Path:
 
     # Wipe existing directory for a fresh from-scratch reset
     if target_dir.exists():
-        shutil.rmtree(target_dir)
+        shutil.rmtree(target_dir, onexc=_remove_readonly)
     target_dir.mkdir(parents=True, exist_ok=True)
 
     # Initialize fresh git repo

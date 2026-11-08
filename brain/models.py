@@ -22,12 +22,37 @@ class CodeCitation(BaseModel):
     valid: Optional[bool] = True
     diff_overlap: Optional[bool] = None
 
+class StructuredEdit(BaseModel):
+    file: str = Field(..., description="Relative path of file to edit")
+    startLine: int = Field(..., description="1-indexed start line of text to replace")
+    endLine: int = Field(..., description="1-indexed end line of text to replace (inclusive)")
+    oldText: str = Field(..., description="Exact existing text in the file to be replaced")
+    newText: str = Field(..., description="New replacement text")
+
+    @model_validator(mode="before")
+    @classmethod
+    def support_snake_case(cls, values: Any) -> Any:
+        if isinstance(values, dict):
+            if "start_line" in values and "startLine" not in values:
+                values["startLine"] = values["start_line"]
+            if "end_line" in values and "endLine" not in values:
+                values["endLine"] = values["end_line"]
+            if "old_text" in values and "oldText" not in values:
+                values["oldText"] = values["old_text"]
+            if "new_text" in values and "newText" not in values:
+                values["newText"] = values["new_text"]
+        return values
+
 class ExecutionTrace(BaseModel):
     tools_called: List[Dict[str, Any]] = Field(default_factory=list)
     steps_used: int = 0
     part_sizes: Dict[str, int] = Field(default_factory=dict)
     time_to_first_output: float = 0.0
     total_time: float = 0.0
+    time_image: float = Field(0.0, description="Time spent on image capture, resizing, and base64 encoding (seconds)")
+    time_context: float = Field(0.0, description="Time spent assembling ordered context and AST codemap (seconds)")
+    time_network: float = Field(0.0, description="Time spent on the remote LLM network call (seconds)")
+    time_parsing: float = Field(0.0, description="Time spent parsing LLM response into schema (seconds)")
     provider: str = "offline_heuristic"
     model_name: str = "heuristic-v1"
     used_fallback: bool = False
@@ -43,6 +68,18 @@ class ExecutionTrace(BaseModel):
     gaze_coherence_note: Optional[str] = Field(
         None, description="Spatial coherence evaluation note regarding gaze vs cursor/caret agreement"
     )
+    screenshot_bytes: Optional[int] = Field(
+        None, description="Actual image payload size in bytes sent to API"
+    )
+    screenshot_mime_type: Optional[str] = Field(
+        None, description="MIME type of screenshot sent to API"
+    )
+    screenshot_dimensions: Optional[Tuple[int, int]] = Field(
+        None, description="Dimensions [width, height] of screenshot"
+    )
+    structured_edit_validation: Optional[str] = Field(
+        None, description="Validation note or reason for inclusion/omission of structured fix"
+    )
 
 class DiagnosisResponse(BaseModel):
     summary: str = Field(..., description="Concise diagnostic summary")
@@ -55,6 +92,7 @@ class DiagnosisResponse(BaseModel):
     source: Literal["model", "offline"] = Field("offline", description="Origin of diagnosis: 'model' or 'offline'")
     explanation: Optional[str] = Field(None, description="Detailed explanation or diff for full_explanation")
     citations: List[CodeCitation] = Field(default_factory=list, description="Citations of specific files/lines")
+    suggestedFix: Optional[StructuredEdit] = Field(None, description="Verified structured edit suggestion")
     trace: Optional[ExecutionTrace] = Field(None, description="Diagnostic execution trace details")
 
     @model_validator(mode="before")
@@ -65,6 +103,8 @@ class DiagnosisResponse(BaseModel):
             if level == "full":
                 level = "full_explanation"
             values["hintLevel"] = level
+            if "suggested_fix" in values and "suggestedFix" not in values:
+                values["suggestedFix"] = values["suggested_fix"]
         return values
 
 class EditorState(BaseModel):
@@ -172,4 +212,38 @@ class DiagnoseRequest(BaseModel):
                 values["screenWidth"] = values["screen_width"]
             if "screen_height" in values and not values.get("screenHeight"):
                 values["screenHeight"] = values["screen_height"]
+        return values
+
+class ApplyFixRequest(BaseModel):
+    fix: StructuredEdit
+    repoPath: Optional[str] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def resolve_fix(cls, values: Any) -> Any:
+        if isinstance(values, dict):
+            if "repo_path" in values and "repoPath" not in values:
+                values["repoPath"] = values["repo_path"]
+            if "file" in values and "fix" not in values:
+                values["fix"] = {
+                    "file": values.get("file"),
+                    "startLine": values.get("startLine") or values.get("start_line", 1),
+                    "endLine": values.get("endLine") or values.get("end_line", 1),
+                    "oldText": values.get("oldText") or values.get("old_text", ""),
+                    "newText": values.get("newText") or values.get("new_text", ""),
+                }
+        return values
+
+class RollbackRequest(BaseModel):
+    checkpointHash: str = Field(..., description="Git commit hash to reset target repo to")
+    repoPath: Optional[str] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def resolve_hash(cls, values: Any) -> Any:
+        if isinstance(values, dict):
+            if "checkpoint_hash" in values and "checkpointHash" not in values:
+                values["checkpointHash"] = values["checkpoint_hash"]
+            if "repo_path" in values and "repoPath" not in values:
+                values["repoPath"] = values["repo_path"]
         return values

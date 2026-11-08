@@ -16,9 +16,15 @@ from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
 from brain.config import BRAIN_PORT, BRAIN_HOST, DEMO_REPO_DIR, CORE_SERVER_URL
-from brain.models import DiagnosisResponse, DiagnoseRequest
+from brain.models import DiagnosisResponse, DiagnoseRequest, ApplyFixRequest, RollbackRequest
 from brain.agent import DiagnosticEngine, broadcast_to_core
-from brain.tools import execute_tool, TOOL_DEFINITIONS
+from brain.tools import (
+    execute_tool,
+    TOOL_DEFINITIONS,
+    apply_fix_to_repo,
+    rollback_repo_checkpoint,
+    SandboxViolationError,
+)
 
 app = FastAPI(
     title="WHACK Brain Service",
@@ -100,6 +106,34 @@ def run_tool_endpoint(payload: Dict[str, Any]):
     if "error" in result and "Sandbox violation" in result["error"]:
         raise HTTPException(status_code=403, detail=result["error"])
     return result
+
+@app.post("/apply-fix")
+def apply_fix_endpoint(req: ApplyFixRequest):
+    """Verify oldText, create checkpoint commit in target repo, and apply fix."""
+    try:
+        from pathlib import Path
+        repo_dir = Path(req.repoPath).resolve() if req.repoPath else DEMO_REPO_DIR
+        res = apply_fix_to_repo(req.fix, repo_dir=repo_dir)
+        if not res.get("success"):
+            return JSONResponse(status_code=400, content=res)
+        return res
+    except Exception as e:
+        if isinstance(e, SandboxViolationError) or "Sandbox violation" in str(e) or "Access denied" in str(e):
+            raise HTTPException(status_code=403, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/rollback")
+def rollback_endpoint(req: RollbackRequest):
+    """Roll back target demo repository to checkpoint hash."""
+    try:
+        from pathlib import Path
+        repo_dir = Path(req.repoPath).resolve() if req.repoPath else DEMO_REPO_DIR
+        res = rollback_repo_checkpoint(req.checkpointHash, repo_dir=repo_dir)
+        if not res.get("success"):
+            return JSONResponse(status_code=400, content=res)
+        return res
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 def main():
     parser = argparse.ArgumentParser(description="Start WHACK Brain Service")

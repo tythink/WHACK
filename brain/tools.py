@@ -7,6 +7,7 @@ or forbidden paths will raise a PermissionError.
 
 import os
 import re
+import sys
 import subprocess
 from pathlib import Path
 from typing import Dict, List, Any, Optional
@@ -227,14 +228,193 @@ def git_diff(commit_a: Optional[str] = "HEAD~1", commit_b: Optional[str] = "HEAD
         )
         if result.returncode != 0:
             return {"error": f"git diff failed: {result.stderr.strip()}"}
+
+        diff_output = result.stdout
+        # If HEAD~1 produces empty diff in demo repo, check diff against baseline tag if available
+        if has_inner_git and commit_a == "HEAD~1" and not diff_output.strip():
+            alt_res = subprocess.run(
+                ["git", "diff", "baseline"], cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=5
+            )
+            if alt_res.returncode == 0 and alt_res.stdout.strip():
+                diff_output = alt_res.stdout
+                commit_a = "baseline"
+
         return {
             "commit_a": commit_a,
             "commit_b": commit_b,
-            "diff": result.stdout,
-            "has_changes": bool(result.stdout.strip())
+            "diff": diff_output,
+            "has_changes": bool(diff_output.strip())
         }
     except Exception as e:
         return {"error": f"git diff failed: {str(e)}"}
+
+def run_repo_tests(repo_dir: Optional[Path] = None) -> Dict[str, Any]:
+    """Run pytest in target demo repository and report test status."""
+    import shutil
+    target_repo = (repo_dir or DEMO_REPO_DIR).resolve()
+    for pyc_dir in target_repo.rglob("__pycache__"):
+        shutil.rmtree(pyc_dir, ignore_errors=True)
+
+    try:
+        env = os.environ.copy()
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
+        res = subprocess.run(
+            [sys.executable, "-B", "-m", "pytest", "tests/"],
+            cwd=str(target_repo),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=15,
+            env=env,
+        )
+        return {
+            "passed": res.returncode == 0,
+            "exit_code": res.returncode,
+            "output": res.stdout.strip(),
+        }
+    except Exception as e:
+        return {
+            "passed": False,
+            "exit_code": -1,
+            "output": f"Failed to execute tests: {e}",
+        }
+
+def apply_fix_to_repo(fix_data: Any, repo_dir: Optional[Path] = None) -> Dict[str, Any]:
+    """Verify oldText against live file, create checkpoint commit in target repo, and apply edit.
+    
+    Path-sandboxing strictly enforced to target demo repo.
+    """
+    import sys
+    target_repo = (repo_dir or DEMO_REPO_DIR).resolve()
+
+    # Normalize fix input
+    if isinstance(fix_data, dict):
+        rel_file = fix_data.get("file")
+        start_line = int(fix_data.get("startLine") or fix_data.get("start_line", 1))
+        end_line = int(fix_data.get("endLine") or fix_data.get("end_line", 1))
+        old_text = fix_data.get("oldText") or fix_data.get("old_text", "")
+        new_text = fix_data.get("newText") or fix_data.get("new_text", "")
+    else:
+        rel_file = fix_data.file
+        start_line = int(fix_data.startLine)
+        end_line = int(fix_data.endLine)
+        old_text = fix_data.oldText
+        new_text = fix_data.newText
+
+    if not rel_file:
+        return {"success": False, "error": "Missing required 'file' in structured fix"}
+
+    # 1. Enforce path sandboxing strictly to target demo repo
+    target_file = _resolve_safe_path(rel_file)
+    if not target_file.exists() or not target_file.is_file():
+        return {"success": False, "error": f"Target file '{rel_file}' not found in demo repo"}
+
+    # 2. Run before tests
+    before_tests = run_repo_tests(target_repo)
+
+    # 3. Read live file and verify oldText matches exactly
+    try:
+        with open(target_file, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+    except Exception as e:
+        return {"success": False, "error": f"Failed to read '{rel_file}': {e}"}
+
+    total_lines = len(lines)
+    if start_line < 1 or end_line < start_line or start_line > max(1, total_lines):
+        return {
+            "success": False,
+            "error": f"Invalid line range {start_line}-{end_line} for '{rel_file}' ({total_lines} lines total)",
+            "before_passed": before_tests["passed"],
+        }
+
+    actual_slice = "".join(lines[start_line - 1 : end_line]).rstrip("\r\n")
+    expected_slice = old_text.rstrip("\r\n")
+
+    if actual_slice != expected_slice:
+        return {
+            "success": False,
+            "error": (
+                f"Refused to apply fix: live file content at lines {start_line}-{end_line} did not match expected oldText.\n"
+                f"Expected: {repr(expected_slice)}\n"
+                f"Live:     {repr(actual_slice)}"
+            ),
+            "before_passed": before_tests["passed"],
+            "after_passed": before_tests["passed"],
+        }
+
+    # 4. Create git checkpoint commit in TARGET repo (never the main project workspace)
+    if not (target_repo / ".git").is_dir():
+        return {"success": False, "error": f"Target directory '{target_repo}' is not a git repository"}
+
+    subprocess.run(["git", "add", "."], cwd=str(target_repo), capture_output=True, text=True)
+    subprocess.run(
+        ["git", "commit", "-m", f"checkpoint: before apply-fix on {rel_file}:{start_line}", "--allow-empty"],
+        cwd=str(target_repo),
+        capture_output=True,
+        text=True,
+    )
+    rev_res = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(target_repo), capture_output=True, text=True)
+    checkpoint_hash = rev_res.stdout.strip()
+
+    # 5. Apply the edit
+    # Prepare replacement lines
+    replacement_lines = [l + "\n" for l in new_text.splitlines()]
+    if not new_text.endswith("\n") and replacement_lines:
+        replacement_lines[-1] = replacement_lines[-1].rstrip("\n")
+        # maintain trailing newline if original slice had one
+        if end_line <= len(lines) and lines[end_line - 1].endswith("\n"):
+            replacement_lines[-1] += "\n"
+
+    updated_lines = lines[: start_line - 1] + replacement_lines + lines[end_line:]
+    try:
+        with open(target_file, "w", encoding="utf-8") as f:
+            f.writelines(updated_lines)
+    except Exception as e:
+        return {"success": False, "error": f"Failed to write changes to '{rel_file}': {e}"}
+
+    # 6. Run after tests
+    after_tests = run_repo_tests(target_repo)
+
+    return {
+        "success": True,
+        "checkpoint_hash": checkpoint_hash,
+        "file": rel_file,
+        "lines": [start_line, end_line],
+        "before_passed": before_tests["passed"],
+        "after_passed": after_tests["passed"],
+        "before_output": before_tests["output"],
+        "after_output": after_tests["output"],
+    }
+
+def rollback_repo_checkpoint(checkpoint_hash: str, repo_dir: Optional[Path] = None) -> Dict[str, Any]:
+    """Roll back target demo repository to checkpoint hash using git reset --hard."""
+    target_repo = (repo_dir or DEMO_REPO_DIR).resolve()
+    if not (target_repo / ".git").is_dir():
+        return {"success": False, "error": f"Target directory '{target_repo}' is not a git repository"}
+
+    # Sanitize hash
+    clean_hash = checkpoint_hash.strip()
+    if not re.match(r"^[0-9a-fA-F]{4,40}$", clean_hash):
+        return {"success": False, "error": f"Invalid git commit hash: {clean_hash}"}
+
+    reset_res = subprocess.run(
+        ["git", "reset", "--hard", clean_hash],
+        cwd=str(target_repo),
+        capture_output=True,
+        text=True,
+    )
+    if reset_res.returncode != 0:
+        return {"success": False, "error": f"git reset --hard failed: {reset_res.stderr.strip()}"}
+
+    subprocess.run(["git", "clean", "-fd"], cwd=str(target_repo), capture_output=True, text=True)
+
+    after_tests = run_repo_tests(target_repo)
+    return {
+        "success": True,
+        "rolled_back_to": clean_hash,
+        "tests_passed": after_tests["passed"],
+        "test_output": after_tests["output"],
+    }
 
 TOOL_DEFINITIONS = [
     {

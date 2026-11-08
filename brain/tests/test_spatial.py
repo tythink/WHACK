@@ -127,3 +127,25 @@ def test_get_real_mouse_position_windows_failure_raises(monkeypatch):
     assert "Windows GetCursorPos failed" in err_msg
     assert "return code=0" in err_msg
     assert "GetLastError=5" in err_msg
+
+
+def test_draw_spatial_markers_on_screenshot(tmp_path):
+    from PIL import Image
+    import io
+    from brain.screenshot import draw_spatial_markers_on_screenshot
+
+    # Synthetic 200x200 canvas
+    img = Image.new("RGB", (200, 200), color=(30, 30, 30))
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    raw_bytes = buf.getvalue()
+
+    out_file = tmp_path / "test_gaze.png"
+    annotated_bytes, out_str = draw_spatial_markers_on_screenshot(
+        raw_bytes,
+        markers={"gaze": (100, 100), "cursor": (50, 50)},
+        output_path=out_file,
+    )
+    assert len(annotated_bytes) > 0
+    assert out_file.exists()
+    assert out_file.stat().st_size > 0
