@@ -27,7 +27,12 @@ from brain.models import (
     ExecutionTrace,
 )
 from brain.tools import execute_tool, TOOL_DEFINITIONS, git_diff
-from brain.screenshot import parse_incoming_screenshot, capture_system_screenshot
+from brain.screenshot import (
+    parse_incoming_screenshot,
+    capture_system_screenshot,
+    normalize_request_spatial_points,
+    evaluate_spatial_coherence,
+)
 from brain.persona import get_random_quip
 from brain.context import assemble_ordered_context, SYSTEM_INSTRUCTIONS
 from brain.citation_verifier import verify_citations
@@ -59,9 +64,17 @@ class DiagnosticEngine:
         elif enable_screenshot:
             screenshot_data = capture_system_screenshot()
 
+        # Spatial coordinate normalization to Gemini's 0-1000 [y, x] scale relative to actual image
+        img_w = screenshot_data.get("width") if screenshot_data else None
+        img_h = screenshot_data.get("height") if screenshot_data else None
+        normalized_points = normalize_request_spatial_points(req, actual_width=img_w, actual_height=img_h)
+
         # 1. Assemble ordered context (6-part context)
         context_text, part_sizes = assemble_ordered_context(
-            req, use_codemap=use_codemap, use_wiki=use_wiki
+            req,
+            use_codemap=use_codemap,
+            use_wiki=use_wiki,
+            normalized_spatial_points=normalized_points,
         )
 
         trace = ExecutionTrace(
@@ -76,6 +89,8 @@ class DiagnosticEngine:
             fallback_calls=0,
             token_usage={},
             diff_overlap=False,
+            spatial_points=normalized_points if normalized_points else None,
+            gaze_coherence_note=None,
         )
 
         active_key = get_active_api_key(LLM_PROVIDER)
@@ -87,7 +102,14 @@ class DiagnosticEngine:
                 t0 = time.time()
                 diagnosis, tool_calls_log, steps, token_usage = await asyncio.wait_for(
                     self._run_tool_loop(
-                        context_text, req, hint_level, trace.provider, trace.model_name, active_key
+                        context_text,
+                        req,
+                        hint_level,
+                        trace.provider,
+                        trace.model_name,
+                        active_key,
+                        screenshot_data=screenshot_data,
+                        normalized_points=normalized_points,
                     ),
                     timeout=self.timeout,
                 )
@@ -135,6 +157,12 @@ class DiagnosticEngine:
         diagnosis, citation_flags, any_diff_overlap = verify_citations(diagnosis, DEMO_REPO_DIR)
         trace.citation_flags = citation_flags
         trace.diff_overlap = any_diff_overlap
+
+        # 5. Evaluate spatial coherence (gaze vs cursor/caret)
+        if normalized_points:
+            trace.gaze_coherence_note = evaluate_spatial_coherence(
+                normalized_points, model_explanation=diagnosis.explanation
+            )
 
         total_time = round(time.time() - start_time, 3)
         trace.total_time = total_time
@@ -192,6 +220,8 @@ class DiagnosticEngine:
         provider: str,
         model_name: str,
         api_key: str,
+        screenshot_data: Optional[Dict[str, Any]] = None,
+        normalized_points: Optional[Dict[str, List[int]]] = None,
     ) -> Tuple[DiagnosisResponse, List[Dict[str, Any]], int, Dict[str, int]]:
         """Run bounded tool calling loop (max 6 turns)."""
         tools_called: List[Dict[str, Any]] = []
@@ -212,6 +242,31 @@ class DiagnosticEngine:
                 "citations (list of objects with file, lines, snippet, note)."
             )
 
+            if normalized_points:
+                prompt += (
+                    f"\n\n### NORMALIZED USER SPATIAL COORDINATES (Gemini [y, x] 0-1000 scale):\n"
+                    f"{json.dumps(normalized_points, indent=2)}\n"
+                    "TRUST HIERARCHY: Caret position (exact insertion point) and cursor position are strong, reliable signals of what the user is actively working on. "
+                    "Gaze is weaker and noisier (developers frequently glance away when confused). "
+                    "Use gaze only when it agrees with or meaningfully adds to what caret, cursor, and diff already show (e.g. gaze on terminal or docs panel). "
+                    "NEVER let gaze override a clear diff-and-error-based diagnosis."
+                )
+
+            contents: List[Any] = []
+            if screenshot_data and screenshot_data.get("base64"):
+                try:
+                    import base64
+                    img_bytes = base64.b64decode(screenshot_data["base64"])
+                    contents.append(
+                        types.Part.from_bytes(
+                            data=img_bytes,
+                            mime_type=screenshot_data.get("mime_type", "image/jpeg"),
+                        )
+                    )
+                except Exception:
+                    pass
+            contents.append(prompt)
+
             # Note: Do not pass response_schema=DiagnosisResponse as Gemini Developer API rejects additionalProperties
             response = None
             max_retries = 3
@@ -219,7 +274,7 @@ class DiagnosticEngine:
                 try:
                     response = client.models.generate_content(
                         model=model_name or "gemini-3.5-flash-lite",
-                        contents=[prompt],
+                        contents=contents,
                         config=types.GenerateContentConfig(
                             system_instruction=SYSTEM_INSTRUCTIONS + "\n\nRespond strictly with valid JSON.",
                             response_mime_type="application/json",

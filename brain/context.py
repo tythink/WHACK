@@ -9,6 +9,7 @@ Assembles model input in exact order:
 (6) screenshot if enabled
 """
 
+import json
 import re
 from typing import Dict, Any, Optional, List, Tuple
 from brain.models import DiagnoseRequest
@@ -22,13 +23,18 @@ You specialize in diagnosing why a developer is stuck.
 CRITICAL INSTRUCTIONS:
 1. Ground truth priority: The architecture wiki is background context and may be out of date; code and git diff are the absolute source of truth. If they conflict, trust the code and say so explicitly.
 2. Start your reasoning with the diff.
-3. Cite file path and exact 1-indexed line numbers for EVERY claim you make.
-4. If evidence is ambiguous, set uncertain: true.
-5. Provide a response matching the requested hintLevel:
+3. SPATIAL & GAZE TRUST HIERARCHY:
+   - Caret position (exact text insertion point) and cursor position are strong, reliable signals of what the user is actively working on.
+   - Gaze is weaker and noisier — people often look away from the actual problem when confused.
+   - Use gaze ONLY when it agrees with or meaningfully adds to what caret, cursor, and diff already show (e.g. gaze is on a terminal, browser, or panel that cursor/caret can't represent).
+   - NEVER let gaze override a clear diff-and-error-based diagnosis.
+4. Cite file path and exact 1-indexed line numbers for EVERY claim you make.
+5. If evidence is ambiguous, set uncertain: true.
+6. Provide a response matching the requested hintLevel:
    - 'nudge': high-level directional clue pointing at the boundary condition or concept.
    - 'hint': pointed clue identifying the exact file, function, and issue mechanism.
    - 'full_explanation': complete root-cause analysis with before/after code diff.
-6. Provide a witty, supportive engineering quip.
+7. Provide a witty, supportive engineering quip.
 """
 
 def extract_affected_files_and_lines_from_diff(diff_text: str) -> List[Tuple[str, int]]:
@@ -57,6 +63,7 @@ def assemble_ordered_context(
     req: DiagnoseRequest,
     use_codemap: bool = True,
     use_wiki: bool = True,
+    normalized_spatial_points: Optional[Dict[str, List[int]]] = None,
     max_total_chars: int = 14000,
 ) -> Tuple[str, Dict[str, int]]:
     """Assemble the 6 context parts in strict order, calculating and returning part sizes."""
@@ -161,12 +168,20 @@ def assemble_ordered_context(
     part_sizes["telemetry"] = len(part5_str)
     sections.append(part5_str)
 
-    # (6) Screenshot
-    part6_str = "## (6) SCREENSHOT CONTEXT\n"
+    # (6) Screenshot and Spatial Coordinates (Gemini [y, x] 0-1000 scale)
+    part6_lines = ["## (6) SCREENSHOT & SPATIAL CONTEXT"]
     if req.screenshot:
-        part6_str += f"Screenshot provided (payload size: {len(req.screenshot)} bytes base64)."
+        part6_lines.append(f"Screenshot provided (payload size: {len(req.screenshot)} bytes base64).")
     else:
-        part6_str += "Disabled or not captured."
+        part6_lines.append("Screenshot: Disabled or not captured.")
+
+    if normalized_spatial_points:
+        part6_lines.append(
+            "Normalized Spatial Coordinates (Gemini convention [y, x], 0-1000 scale relative to actual image dimensions):\n"
+            f"```json\n{json.dumps(normalized_spatial_points, indent=2)}\n```\n"
+            "Trust hierarchy: Caret & cursor are strong signals of user edit focus. Gaze is noisy/ambient and must NEVER override code diff or error evidence."
+        )
+    part6_str = "\n".join(part6_lines)
     part_sizes["screenshot"] = len(part6_str)
     sections.append(part6_str)
 

@@ -37,6 +37,12 @@ class ExecutionTrace(BaseModel):
     real_model_calls: int = 0
     fallback_calls: int = 0
     token_usage: Dict[str, int] = Field(default_factory=dict)
+    spatial_points: Optional[Dict[str, List[int]]] = Field(
+        None, description="Normalized 0-1000 [y, x] spatial coordinates for gaze, cursor, and caret"
+    )
+    gaze_coherence_note: Optional[str] = Field(
+        None, description="Spatial coherence evaluation note regarding gaze vs cursor/caret agreement"
+    )
 
 class DiagnosisResponse(BaseModel):
     summary: str = Field(..., description="Concise diagnostic summary")
@@ -124,6 +130,24 @@ class DiagnoseRequest(BaseModel):
     terminal: Optional[TerminalState] = Field(None, description="Alias for terminalState")
     events: Optional[List[Dict[str, Any]]] = Field(None, description="Recent events from Core ring buffer")
     stream: Optional[bool] = Field(False, description="Whether to stream response as SSE")
+    diff: Optional[str] = Field(None, description="Optional explicit unified diff text")
+
+    # Multimodal spatial coordinates in raw screen pixels (contract addition)
+    gazePoint: Optional[Union[List[Union[int, float]], Tuple[Union[int, float], ...]]] = Field(
+        None, description="User gaze point [x, y] in raw screen pixels"
+    )
+    cursorScreenPos: Optional[Union[List[Union[int, float]], Tuple[Union[int, float], ...]]] = Field(
+        None, description="Mouse cursor position [x, y] in raw screen pixels"
+    )
+    caretScreenPos: Optional[Union[List[Union[int, float]], Tuple[Union[int, float], ...]]] = Field(
+        None, description="Text caret insertion position [x, y] in raw screen pixels"
+    )
+    screenWidth: Optional[int] = Field(
+        None, description="Reported screen width in pixels for coordinate space"
+    )
+    screenHeight: Optional[int] = Field(
+        None, description="Reported screen height in pixels for coordinate space"
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -137,4 +161,15 @@ class DiagnoseRequest(BaseModel):
                 values["hintLevel"] = values["hint_level"]
             if "attempt_log" in values and not values.get("attemptLog"):
                 values["attemptLog"] = values["attempt_log"]
+            # Spatial coordinate snake_case aliases
+            if "gaze_point" in values and not values.get("gazePoint"):
+                values["gazePoint"] = values["gaze_point"]
+            if "cursor_screen_pos" in values and not values.get("cursorScreenPos"):
+                values["cursorScreenPos"] = values["cursor_screen_pos"]
+            if "caret_screen_pos" in values and not values.get("caretScreenPos"):
+                values["caretScreenPos"] = values["caret_screen_pos"]
+            if "screen_width" in values and not values.get("screenWidth"):
+                values["screenWidth"] = values["screen_width"]
+            if "screen_height" in values and not values.get("screenHeight"):
+                values["screenHeight"] = values["screen_height"]
         return values
