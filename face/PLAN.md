@@ -117,15 +117,61 @@ The face service emits events via HTTP POST to `http://localhost:3000/events`.
 
 ---
 
-## 5. Fusion Engine Decision Matrix
+## 5. Unified Signal + Facial User Status & Active Brain Caller Contract
 
-| Face State | Gaze Zone | Editor/Terminal Signal | Fusion Action |
+### 5.1 Active Caller Architecture (Role 1+2 $\rightarrow$ Role 3 Brain)
+Role 1+2 (`face/` + `signals/`) acts as the **active caller**, continuously fusing **Signal** inputs (mouse cursor, keyboard text cursor `|`, idle/dwell, undo/erase bursts, terminal/window events) with **Facial/Body/Gaze** inputs to classify the real-time **User Status**. **Role 3 (`brain/`) waits passively** until invoked by our fusion trigger (via direct Python callable/method or HTTP `POST http://localhost:5002/diagnose`).
+
+Whenever an actionable stuck/intervention status triggers (and **never** when `afk_away`), we pass **4 mandatory inputs** (3 screen pixel coordinates + the 6 emotions):
+1. **`mouse_cursor`**: `(mouse_x_px, mouse_y_px)` — current screen coordinate of the OS mouse pointer.
+2. **`keyboard_cursor`**: `(caret_x_px, caret_y_px)` — current screen coordinate of the keyboard text cursor (vertical bar `|`).
+3. **`eye_gaze`**: `(gaze_x_px, gaze_y_px)` — current 3D head-invariant eye-tracking coordinate on screen.
+4. **`emotions`**: all **6 affective scores** (`confused`, `frustrated`, `surprised`, `flow`, `fatigued`, `delighted`).
+
+```json
+{
+  "mouse_cursor": { "x": 1120, "y": 640 },
+  "keyboard_cursor": { "x": 680, "y": 410, "detected": true },
+  "eye_gaze": { "x": 692, "y": 418, "zone": "screen_editor" },
+  "emotions": {
+    "confused": 0.82,
+    "frustrated": 0.35,
+    "surprised": 0.05,
+    "flow": 0.12,
+    "fatigued": 0.06,
+    "delighted": 0.02
+  },
+  "user_status": {
+    "state": "stuck_frozen_at_caret",
+    "score": 0.84,
+    "confidence": 0.91,
+    "primary_emotion": "confused",
+    "body_gesture": "head_scratch",
+    "reasons": [
+      "keyboard_cursor idle 16.4s & mouse_cursor idle 18.1s",
+      "eye_gaze pinned 15px from keyboard_cursor",
+      "sustained confused (0.81) + head_scratch"
+    ]
+  },
+  "hintLevel": "nudge",
+  "attemptLog": "Last 5m: Caret frozen 16s at (680, 410); 4 backspaces/undos."
+}
+```
+
+### 5.2 Combined Signal + Facial User Status Matrix
+
+| Unified User Status | Signal Cues (`mouse_cursor`, `keyboard_cursor`, Dwell, Edits) | Facial & Gaze Cues (`eye_gaze`, Emotion, Body, Talking) | Action Toward Role 3 Brain |
 | :--- | :--- | :--- | :--- |
-| `confused` or `frustrated` ($\ge 0.75$) | `screen_editor` or `screen_terminal` | Repeated error or stuck on test | **Trigger Proactive Nudge** (high confidence) |
-| `confused` ($\ge 0.75$) | `looking_away` | No recent keystrokes | **Deep Thought Mode** (Suppress nudge / delay 15s) |
-| Any emotion | Any zone | User is talking (`talking: true`) | **Suppress Nudge** (user communicating/pair programming) |
-| `fatigued` ($\ge 0.80$) | `screen_editor` / slow gaze | Degraded typing cadence | **Break / Rest Recommendation** |
-| `flow` ($\ge 0.80$) | `screen_editor` | Continuous typing | **Silence All Notifications** |
+| **`stuck_frozen_at_caret`** | `keyboard_cursor` & `mouse_cursor` idle $\ge 12\text{s}$ | `eye_gaze` pinned near `keyboard_cursor` + (`confused` / `frustrated` / `head_scratch` / `chin_rest`) | **Actively Call Brain** (pass 3 coordinates + status) |
+| **`stuck_erase_thrash`** | Rapid `Backspace`/`Ctrl+Z` burst + `keyboard_cursor` oscillating on same line | On-screen `eye_gaze` + elevated `confused` / `frustrated` | **Actively Call Brain** (pass 3 coordinates + status) |
+| **`stuck_attention_split`** | `keyboard_cursor` parked ($\ge 8\text{s}$) | `eye_gaze` / `mouse_cursor` darting $> 350\text{ px}$ between `keyboard_cursor` & error/docs + distress | **Actively Call Brain** (pass 3 coordinates + status) |
+| **`frustrated_blocked`** | Mouse frustration wiggle **or** repeated terminal failure | `frustrated` / `surprised` + `facepalm_or_rub` / `hands_thrown_up` | **Actively Call Brain** (pass 3 coordinates + status) |
+| **`afk_away`** | Mouse & keyboard cursor idle $> 15\text{s}$ | `looking_away` **or** no face detected | **Suppress & Pause Timers** (user away) |
+| **`calm_reading`** | Mouse & keyboard cursor idle $> 10\text{s}$ | `flow` expression + `eye_gaze` scanning lines | **Suppress** (calmly reading code/docs) |
+| **`talking_suppressed`** | Any | `talking: true` | **Suppress** (speaking/collaborating) |
+| **`focused_flow`** | Steady `keyboard_cursor` progression (`dwell < 4s`) | `eye_gaze` near `keyboard_cursor` + `flow` | **Silence All** (Do-Not-Disturb) |
+| **`fatigued`** | Degraded typing / long cursor idle | Sustained `fatigued` ($\ge 0.70$, lid droop / `eye_rub`) | **Break Recommendation** |
+| **`eureka_resolved`** | Typing resumes / passing run | `delighted` / `thumbs_up` after prior distress | **Reset Stuck Score & Cooldown** |
 
 ---
 
